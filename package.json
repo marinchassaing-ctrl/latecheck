@@ -1,0 +1,12 @@
+{
+  "name": "latecheck",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LateCheck — vente de départs tardifs avec Stripe Connect",
+  "main": "server.js",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --no-warnings server.js",
+    "stripe:listen": "stripe listen --forward-to localhost:3000/api/stripe/webhook --forward-connect-to localhost:3000/api/stripe/webhook"
+  }
+}
