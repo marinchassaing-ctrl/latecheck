@@ -147,6 +147,25 @@ async function stripe(method, p, params = {}, { account, idem } = {}) {
   }
   return data;
 }
+/* API Stripe v2 (Accounts v2, imposée pour les nouvelles plateformes Connect) */
+const STRIPE_V2_VERSION = env.STRIPE_V2_VERSION || '2026-09-30.endive';
+async function stripeV2(method, p, body, { idem } = {}) {
+  const call = async (version) => {
+    const headers = { Authorization: 'Bearer ' + STRIPE_KEY, 'Stripe-Version': version };
+    if (method !== 'GET') headers['Content-Type'] = 'application/json';
+    if (idem) headers['Idempotency-Key'] = idem;
+    const r = await fetch(STRIPE_API + p, { method, headers, body: method === 'GET' ? undefined : JSON.stringify(body || {}) });
+    return { r, data: await r.json().catch(() => ({})) };
+  };
+  let { r, data } = await call(STRIPE_V2_VERSION);
+  if (!r.ok && /version/i.test(JSON.stringify(data.error || '')) && STRIPE_V2_VERSION !== '2026-09-30.preview') ({ r, data } = await call('2026-09-30.preview'));
+  if (!r.ok) {
+    const msg = (data.error && data.error.message) || 'Stripe ' + r.status;
+    console.error('Stripe v2', method, p, r.status, msg);
+    const e = new Error(msg); e.stripe = true; throw e;
+  }
+  return data;
+}
 function verifyStripeSignature(raw, header) {
   if (!header || !WH_SECRETS.length) return false;
   let t = null; const sigs = [];
@@ -213,9 +232,11 @@ setInterval(() => { try { sweep(); } catch (e) { console.error('sweep', e); } },
 /* ------------------------------------------------------------------ Stripe Connect : comptes hôtes */
 async function syncAccount(user) {
   if (!user.stripe_account) return user;
-  const a = await stripe('GET', `/accounts/${user.stripe_account}`);
-  const ready = !!(a.details_submitted && a.capabilities && a.capabilities.transfers === 'active');
-  q('UPDATE users SET payouts_ready=?, details_submitted=? WHERE id=?').run(ready ? 1 : 0, a.details_submitted ? 1 : 0, user.id);
+  const a = await stripeV2('GET', `/v2/core/accounts/${user.stripe_account}?include=configuration.recipient`);
+  const t = a.configuration && a.configuration.recipient && a.configuration.recipient.capabilities
+    && a.configuration.recipient.capabilities.stripe_balance && a.configuration.recipient.capabilities.stripe_balance.stripe_transfers;
+  const ready = !!(t && t.status === 'active');
+  q('UPDATE users SET payouts_ready=?, details_submitted=? WHERE id=?').run(ready ? 1 : 0, ready ? 1 : 0, user.id);
   return q('SELECT * FROM users WHERE id=?').get(user.id);
 }
 
@@ -384,19 +405,25 @@ route('POST', '/api/auth/setup-admin', (req, res) => {
 /* Stripe Connect : hôte */
 route('POST', '/api/stripe/connect', async (req) => {
   let u = need(req, 'host');
+  if (!APP_URL.startsWith('https://') && !env.STRIPE_API_BASE) fail(500, "APP_URL doit être une adresse https:// (réglage du serveur).");
   if (!u.stripe_account) {
-    const a = await stripe('POST', '/accounts', {
-      type: 'express', country: 'FR', email: u.email, default_currency: 'eur',
-      capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
-      business_profile: { product_description: 'Location courte durée — départs tardifs vendus via LateCheck' },
+    const a = await stripeV2('POST', '/v2/core/accounts', {
+      contact_email: u.email, display_name: u.name, dashboard: 'express',
+      identity: { country: 'fr' },
+      defaults: { responsibilities: { fees_collector: 'application', losses_collector: 'application' } },
+      configuration: { recipient: { capabilities: { stripe_balance: { stripe_transfers: { requested: true } } } } },
       metadata: { latecheck_user: u.id },
-    }, { idem: 'acct_' + u.id });
+    }, { idem: 'acctv2_' + u.id });
     q('UPDATE users SET stripe_account=? WHERE id=?').run(a.id, u.id);
     u = q('SELECT * FROM users WHERE id=?').get(u.id);
   }
-  const link = await stripe('POST', '/account_links', {
-    account: u.stripe_account, type: 'account_onboarding',
-    refresh_url: `${APP_URL}/#/h/account?stripe=refresh`, return_url: `${APP_URL}/#/h/account?stripe=return`,
+  const link = await stripeV2('POST', '/v2/core/account_links', {
+    account: u.stripe_account,
+    use_case: { type: 'account_onboarding', account_onboarding: {
+      configurations: ['recipient'],
+      refresh_url: `${APP_URL}/#/h/account?stripe=refresh`,
+      return_url: `${APP_URL}/#/h/account?stripe=return`,
+    } },
   });
   return { url: link.url };
 });
