@@ -2,8 +2,11 @@
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>LateCheck</title>
+<meta name="theme-color" content="#FFFFFF">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="LateCheck">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
@@ -31,10 +34,12 @@
   color-scheme:dark;
 }
 *,*::before,*::after{box-sizing:border-box}
-html,body{height:100%;margin:0}
-body{background:var(--page);color:var(--ink);font-family:"Figtree",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:15px;line-height:1.45;-webkit-font-smoothing:antialiased}
+html,body{height:100%;margin:0;overflow-x:hidden;overscroll-behavior:none;-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{background:var(--bg);color:var(--ink);font-family:"Figtree",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:15px;line-height:1.45;-webkit-font-smoothing:antialiased}
 #app{max-width:480px;min-height:100%;margin:0 auto;background:var(--bg);position:relative;display:flex;flex-direction:column}
-@media (min-width:520px){#app{box-shadow:0 0 0 1px var(--line)}}
+html{background:var(--bg)}
+@media (min-width:520px){html,body{background:var(--page)}#app{box-shadow:0 0 0 1px var(--line)}}
+#app{width:100%;overflow-x:hidden}
 button,input,select,textarea{font:inherit;color:inherit}
 a{color:var(--green)}
 :focus-visible{outline:2px solid var(--green);outline-offset:2px;border-radius:6px}
@@ -107,7 +112,7 @@ a.item:hover{border-color:var(--sage)}
 .kv .total span:first-child{color:var(--ink);font-weight:600}
 
 label.f{display:block;font-size:14px;font-weight:600;margin:16px 0 6px}
-.input{width:100%;min-height:48px;border:1px solid var(--line);background:var(--surface);border-radius:var(--r-sm);padding:0 14px;outline:none}
+.input{width:100%;min-height:48px;font-size:16px;border:1px solid var(--line);background:var(--surface);border-radius:var(--r-sm);padding:0 14px;outline:none}
 textarea.input{padding:12px 14px;min-height:84px;resize:vertical}
 .input:focus{border-color:var(--green);background:var(--bg)}
 .hint{font-size:12.5px;color:var(--muted);margin-top:6px}
