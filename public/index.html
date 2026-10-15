@@ -396,6 +396,7 @@ route('/', () => {
     <p class="sub">Vendez des départs tardifs à vos voyageurs, sans abonnement.</p>
     <div class="stack"><a class="btn" href="#/signup">S'inscrire avec un e-mail</a><a class="btn ghost" href="#/login">J'ai déjà un compte</a></div>
     <p class="small mt2">Gratuit pour les hôtes. LateCheck prélève 10 % uniquement sur les départs tardifs payés.</p>
+    ${legalLinks()}
     ${!db.hasAdmin && db.adminConfigured ? `<p class="small mt"><a href="#/setup-admin">Configurer le compte administrateur</a></p>`:''}
   </main>`);
 });
@@ -405,10 +406,11 @@ route('/signup', () => {
     <label class="f" for="n">Prénom et nom</label><input class="input" id="n" autocomplete="name" placeholder="Ex : Marin Dupont">
     <label class="f" for="e">E-mail</label><input class="input" id="e" type="email" autocomplete="email" placeholder="vous@exemple.fr">
     <label class="f" for="p">Mot de passe</label><input class="input" id="p" type="password" autocomplete="new-password" placeholder="8 caractères minimum">
+    <label class="mt" style="display:flex;gap:10px;align-items:flex-start;font-size:14px;cursor:pointer"><input type="checkbox" id="t" style="width:20px;height:20px;accent-color:var(--green);flex:none;margin-top:1px"><span>J'accepte les <a href="#/legal/cgu">conditions générales d'utilisation</a> et la <a href="#/legal/privacy">politique de confidentialité</a>.</span></label>
     <p class="err" id="err"></p><button class="btn mt" id="b">Créer mon compte</button>
   </form></main>`);
   $('#f').onsubmit = ev => { ev.preventDefault(); submitForm($('#b'), $('#err'), async () => {
-    await api('POST','/api/auth/signup',{name:$('#n').value, email:$('#e').value, password:$('#p').value}); toast('Compte créé'); go('#/h'); }); };
+    await api('POST','/api/auth/signup',{name:$('#n').value, email:$('#e').value, password:$('#p').value, acceptTerms:$('#t').checked}); toast('Compte créé'); go('#/h'); }); };
 });
 route('/login', () => {
   page(`${topBar({title:'Connexion', back:'#/'})}<main class="main"><form id="f" novalidate>
@@ -446,7 +448,7 @@ route('/h', () => {
   const mk=monthKey(now()), Pm=P.filter(p=>monthKey(p.createdAt)===mk), pending=R.filter(r=>r.status==='pending');
   page(`${topBar({title:'LateCheck', brand:true, right:`<button class="iconbtn" aria-label="Mon compte" data-go="#/h/account">${I.menu}</button>`})}<main class="main">
     <h2 class="title">Bonjour ${esc(u.name.split(' ')[0])} 👋</h2><p class="sub">L'essentiel de vos départs tardifs.</p>
-    ${stripeBanner(u)}
+    ${stripeBanner(u)}<div id="pushcard"></div>
     <div class="tint"><div class="split"><div><div class="kpi-big">${eur(sum(Pm,p=>p.net))}</div><div class="kpi-label">nets pour vous en ${monthLabel(mk).toLowerCase()}</div></div><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8M15 7h6v6"/></svg></div></div>
     <div class="stats"><a class="stat" href="#/h/listings" style="text-decoration:none;color:inherit"><b>${L.length}</b><span>logement${L.length>1?'s':''}</span></a><a class="stat" href="#/h/requests" style="text-decoration:none;color:inherit"><b>${pending.length}</b><span>en attente</span></a><a class="stat" href="#/h/revenue" style="text-decoration:none;color:inherit"><b>${P.length}</b><span>vendus</span></a></div>
     <a class="btn mt" href="#/h/listings/new">Ajouter un logement ${I.plus}</a>
@@ -455,6 +457,7 @@ route('/h', () => {
     ${L.length?`<div class="list">${L.slice(0,3).map(l=>listingItem(db,l)).join('')}</div>`:`<div class="empty"><b>Aucun logement pour l'instant</b>Ajoutez votre premier logement pour obtenir son QR code.</div>`}
     <h3 class="sec">Dernières transactions</h3>${txList(db, hostPayments(db,u.id).slice(0,4))}
   </main>`, {nav:hostNav('home',db,u)});
+  pushCard();
 });
 function listingItem(db,l){
   const n=db.requests.filter(r=>r.listingId===l.id && monthKey(r.createdAt)===monthKey(now())).length;
@@ -751,9 +754,35 @@ route('/h/account', () => {
   page(`${topBar({title:'Mon compte', back:'#/h'})}<main class="main">
     <h2 class="title">${esc(u.name)}</h2><p class="sub">${esc(u.email)}</p>
     <h3 class="sec">Paiements</h3><div class="card">${stripeCard}</div>
+    <div id="pushcard" class="mt"></div>
+    <h3 class="sec">Paramètres</h3>
+    <div class="menu">
+      <a href="#/legal/cgu">${I.list} Conditions générales d'utilisation <span class="chev">${I.chev}</span></a>
+      <a href="#/legal/cgv">${I.list} Conditions générales de vente <span class="chev">${I.chev}</span></a>
+      <a href="#/legal/privacy">${I.lock.replace(/24/g,'20')} Politique de confidentialité <span class="chev">${I.chev}</span></a>
+      <a href="#/legal/mentions">${I.info} Mentions légales <span class="chev">${I.chev}</span></a>
+      <a href="mailto:${esc((db.legal||{}).email||'')}">${I.mail} Contacter LateCheck <span class="chev">${I.chev}</span></a>
+      <button data-act="logout">${I.out} Se déconnecter</button>
+      <a href="#/h/account/delete" class="red">${I.trash} Supprimer mon compte</a>
+    </div>
     <h3 class="sec">Notifications reçues</h3>${emailList(db.emails.slice(0,6))}
-    <button class="btn ghost mt2" data-act="logout">${I.out} Se déconnecter</button>
   </main>`, {nav:hostNav('',db,u)});
+  pushCard();
+});
+route('/h/account/delete', () => {
+  const g=guard('host'); if(!g) return; const {db,u}=g;
+  const pending = hostRequests(db,u.id).filter(r=>['pending','capturing'].includes(r.status)).length;
+  page(`${topBar({title:'Supprimer mon compte', back:'#/h/account'})}<main class="main"><form id="f" novalidate>
+    <h2 class="title">Supprimer mon compte</h2>
+    <p class="sub">Cette action est définitive.</p>
+    <div class="kv"><div><span>Vos logements et QR codes</span><b>désactivés</b></div><div><span>Demandes en attente${pending?` (${pending})`:''}</span><b>annulées, montants libérés</b></div><div><span>Vos données personnelles</span><b>effacées</b></div><div><span>Historique des paiements</span><b>conservé anonymisé</b></div></div>
+    <p class="hint">L'historique des paiements est conservé sous forme anonyme pour nos obligations comptables. Votre compte Stripe reste à votre nom : vous le gérez directement chez Stripe.</p>
+    <label class="f" for="p">Confirmez avec votre mot de passe</label><input class="input" id="p" type="password" autocomplete="current-password">
+    <p class="err" id="err"></p><button class="btn danger mt" id="b">${I.trash} Supprimer définitivement mon compte</button>
+    <a class="btn ghost mt" href="#/h/account">Annuler</a>
+  </form></main>`);
+  $('#f').onsubmit = ev => { ev.preventDefault(); if(!confirm('Supprimer définitivement votre compte LateCheck ?')) return;
+    submitForm($('#b'), $('#err'), async () => { await api('POST','/api/account/delete',{password:$('#p').value}); toast('Votre compte a été supprimé.'); go('#/'); }); };
 });
 ACT.stripecon = btn => withLock(btn, async () => { const r=await api('POST','/api/stripe/connect'); location.href=r.url; await new Promise(()=>{}); });
 ACT.stripedash = btn => withLock(btn, async () => { const r=await api('POST','/api/stripe/dashboard'); window.open(r.url,'_blank','noopener'); });
@@ -807,13 +836,14 @@ route('/s/:slug/recap', slug => {
     <label class="f" for="e">E-mail</label><input class="input" id="e" type="email" autocomplete="email" value="${esc(d.email||'')}"><p class="hint">Pour recevoir la réponse de votre hôte et le lien de paiement.</p>
     <label class="f" for="m">Message pour votre hôte (facultatif)</label><textarea class="input" id="m" maxlength="300" placeholder="Merci beaucoup !">${esc(d.message||'')}</textarea>
     <div class="note mt">${I.lock.replace(/24/g,'20')}<div>Le montant est <b>réservé</b> sur votre carte, pas prélevé. Il n'est encaissé que si votre hôte accepte. S'il refuse, il est libéré automatiquement.</div></div>
+    <label class="mt" style="display:flex;gap:10px;align-items:flex-start;font-size:14px;cursor:pointer"><input type="checkbox" id="cgv" style="width:20px;height:20px;accent-color:var(--green);flex:none;margin-top:1px"><span>J'accepte les <a href="#/legal/cgv">conditions générales de vente</a> et la <a href="#/legal/privacy">politique de confidentialité</a>.</span></label>
     <p class="err" id="err"></p><button class="btn mt" id="send">${I.lock} Réserver ${eur(l.prices[h])} et envoyer ma demande</button>
     <p class="small center">Carte bancaire, Apple Pay ou Google Pay, sur la page sécurisée Stripe.</p>
   </form></main>`);
   const saveDraft = () => setDraft({slug, hours:h, date:$('#dt').value, name:$('#n').value, email:$('#e').value, message:$('#m').value});
   $$('#f input, #f textarea').forEach(i=>i.addEventListener('input', saveDraft));
   $('#f').onsubmit = ev => { ev.preventDefault(); submitForm($('#send'), $('#err'), async () => {
-    const r = await api('POST','/api/public/requests',{slug, hours:h, date:$('#dt').value, name:$('#n').value, email:$('#e').value, message:$('#m').value});
+    const r = await api('POST','/api/public/requests',{slug, hours:h, date:$('#dt').value, name:$('#n').value, email:$('#e').value, message:$('#m').value, acceptCgv:$('#cgv').checked});
     rememberGuest(r.id, r.guestToken);
     if(r.duplicate){ toast('Vous avez déjà une demande pour cette date.'); setDraft(null); return go('#/r/'+r.id+'/'+r.guestToken); }
     setDraft(null);
@@ -973,7 +1003,84 @@ route('/a/settings', () => {
 route('/a/emails', () => { const g=guard('admin'); if(!g) return; const {db}=g;
   page(`${topBar({title:'E-mails', back:'#/a/settings'})}<main class="main"><h2 class="title">E-mails envoyés</h2><p class="sub">Journal des 100 derniers e-mails. Ils partent réellement si RESEND_API_KEY est configurée.</p>${emailList(db.emails)}</main>`, {nav:adminNav('')}); });
 
+/* ============================ Pages légales ============================ */
+const LEGAL_TITLES = {cgu:"Conditions générales d'utilisation", cgv:'Conditions générales de vente', privacy:'Politique de confidentialité', mentions:'Mentions légales'};
+function legalHtml(kind){
+  const L = STATE.legal || {};
+  const ed = `${esc(L.company)}, ${esc(L.form)}, SIREN ${esc(L.siren)}, ${esc(L.address)}`;
+  const h = t => `<h3 class="sec" style="margin-top:22px">${t}</h3>`;
+  const p = t => `<p style="margin:0 0 10px">${t}</p>`;
+  if(kind==='mentions') return h('Éditeur')+p(`Le service LateCheck est édité par ${ed}.${L.vat?` TVA intracommunautaire : ${esc(L.vat)}.`:''}`)+p(`Contact : ${esc(L.email)}`)+p(`Directeur de la publication : ${esc(L.director)}.`)
+    +h('Hébergement')+p("Render Services, Inc., San Francisco, Californie, États-Unis (render.com).")
+    +h('Paiements')+p("Les paiements sont traités par Stripe Payments Europe, Ltd., 1 Grand Canal Street Lower, Dublin 2, Irlande. LateCheck n'enregistre aucune coordonnée bancaire.");
+  if(kind==='privacy') return p(`Responsable du traitement : ${ed}. Contact : ${esc(L.email)}.`)
+    +h('Données collectées')+p("<b>Hôtes</b> : nom, e-mail, mot de passe (stocké chiffré), logements (nom, adresse, photo, horaires, tarifs), historique des demandes et paiements, identifiant de l'appareil pour les notifications si vous les activez. Votre identité et votre RIB sont collectés et conservés par Stripe, pas par LateCheck.")
+    +p("<b>Voyageurs</b> : prénom, e-mail, date de départ, durée demandée, message facultatif. Les données de carte sont saisies uniquement sur la page sécurisée de Stripe.")
+    +p("<b>Données techniques</b> : un cookie de session strictement nécessaire à la connexion. Aucun cookie publicitaire ni de mesure d'audience.")
+    +h('Finalités et bases légales')+p("Fournir le service et traiter les paiements (exécution du contrat) ; envoyer les e-mails et notifications liés aux demandes (exécution du contrat) ; respecter nos obligations comptables et fiscales (obligation légale) ; prévenir la fraude et sécuriser le service (intérêt légitime).")
+    +h('Destinataires')+p("L'hôte concerné par la demande ; Stripe (paiements) ; Render (hébergement) ; notre prestataire d'envoi d'e-mails ; Apple (acheminement des notifications). Certains prestataires sont situés hors de l'Union européenne ; les transferts sont encadrés par les clauses contractuelles types de la Commission européenne.")
+    +h('Durées de conservation')+p("Compte hôte : jusqu'à sa suppression. Données de transaction : 10 ans (obligations comptables), sous forme anonymisée après suppression du compte. Demandes voyageurs : 3 ans après la date de départ.")
+    +h('Vos droits')+p(`Vous disposez des droits d'accès, de rectification, d'effacement, d'opposition, de limitation et de portabilité. Écrivez à ${esc(L.email)}. Les hôtes peuvent supprimer leur compte à tout moment depuis Mon compte. Vous pouvez introduire une réclamation auprès de la CNIL (cnil.fr).`);
+  if(kind==='cgu') return p(`Les présentes conditions régissent l'utilisation de LateCheck par les hôtes et conciergeries (« l'Hôte »). Le service est édité par ${ed}.`)
+    +h('1. Objet')+p("LateCheck permet à l'Hôte de proposer à ses voyageurs, via un QR code propre à chaque logement, l'achat d'un départ tardif, et d'accepter ou refuser chaque demande.")
+    +h("2. Rôle de LateCheck")+p("LateCheck est un intermédiaire technique. Le départ tardif est une prestation fournie par l'Hôte, qui en reste seul responsable vis-à-vis du voyageur (disponibilité du logement, respect de l'horaire accordé, conformité avec son bail ou son règlement de copropriété).")
+    +h('3. Inscription')+p("L'Hôte fournit des informations exactes et protège son mot de passe. Un compte est personnel. Pour recevoir des paiements, l'Hôte connecte un compte Stripe et accepte le Contrat de services Stripe Connect.")
+    +h('4. Prix et commission')+p("L'inscription est gratuite et sans abonnement. L'Hôte fixe librement ses tarifs. Sur chaque départ tardif payé, LateCheck prélève automatiquement une commission de 10 % ainsi que des frais de paiement, affichés dans l'espace Revenus. Le solde est versé sur le compte Stripe de l'Hôte. Aucune commission n'est due sur une demande refusée, expirée ou remboursée.")
+    +h('5. Paiements')+p("Le voyageur réserve le montant sur sa carte au moment de sa demande. Le paiement est encaissé uniquement si l'Hôte accepte ; sinon la réservation est libérée. L'Hôte s'engage à honorer tout départ tardif accepté. Il peut rembourser un voyageur depuis l'application ; la commission est alors annulée, les frais de paiement de Stripe restant perdus.")
+    +h('6. Obligations fiscales')+p("Les revenus perçus via LateCheck peuvent être imposables et soumis à cotisations sociales. L'Hôte est seul responsable de leurs déclarations (informations sur impots.gouv.fr et urssaf.fr). Conformément à la réglementation, LateCheck peut être amené à transmettre à l'administration fiscale les montants perçus par l'Hôte.")
+    +h('7. Responsabilité et suspension')+p("LateCheck met en œuvre les moyens raisonnables pour assurer la disponibilité du service, sans garantie d'absence d'interruption. LateCheck peut suspendre un compte en cas d'utilisation frauduleuse ou contraire aux présentes.")
+    +h('8. Résiliation')+p("L'Hôte peut supprimer son compte à tout moment depuis Mon compte → Supprimer mon compte. Les demandes en cours sont alors annulées et les montants réservés libérés.")
+    +h('9. Modifications et droit applicable')+p("Ces conditions peuvent évoluer ; l'Hôte en est informé avant leur entrée en vigueur. Elles sont soumises au droit français.");
+  if(kind==='cgv') return p(`Les présentes conditions s'appliquent à l'achat d'un départ tardif par un voyageur (« le Client ») via LateCheck, service édité par ${ed}.`)
+    +h('1. Le vendeur')+p("Le départ tardif est vendu et fourni par l'hôte du logement (« l'Hôte »). LateCheck est un intermédiaire technique qui met en relation le Client et l'Hôte et traite le paiement pour le compte de l'Hôte. LateCheck ne garantit pas la disponibilité du logement.")
+    +h('2. Prix')+p("Les prix sont fixés par l'Hôte et indiqués toutes taxes comprises avant toute commande. Ils incluent la commission de service de LateCheck, perçue sur la part de l'Hôte : le Client ne paie aucun frais supplémentaire.")
+    +h('3. Commande et paiement')+p("Le Client choisit une durée, renseigne son prénom et son e-mail, puis réserve le montant sur sa carte via la page sécurisée de Stripe (carte, Apple Pay, Google Pay). Cette réservation n'est pas un débit. Si l'Hôte accepte, le montant est prélevé et le départ tardif est confirmé par e-mail. Si l'Hôte refuse ou ne répond pas dans le délai indiqué, la réservation est libérée et rien n'est prélevé ; selon les banques, la libération peut prendre quelques jours.")
+    +h('4. Exécution')+p("Le départ tardif confirmé autorise le Client à rester dans le logement jusqu'à l'heure indiquée, à la date choisie. Sans confirmation, l'heure de départ habituelle s'applique.")
+    +h('5. Droit de rétractation')+p("Conformément à l'article L221-28, 12° du Code de la consommation, le droit de rétractation ne s'applique pas aux prestations de services d'hébergement fournies à une date déterminée.")
+    +h('6. Annulation et remboursement')+p(`Si l'Hôte ne peut finalement pas honorer un départ tardif payé, le Client est intégralement remboursé. Pour toute réclamation, contactez l'Hôte ou écrivez à ${esc(L.email)}.`)
+    +h('7. Médiation')+p(`En cas de litige non résolu, le Client peut recourir gratuitement au médiateur de la consommation : ${esc(L.mediator)}, ou à la plateforme européenne de règlement en ligne des litiges.`)
+    +h('8. Données personnelles et droit applicable')+p("Voir la politique de confidentialité. Les présentes conditions sont soumises au droit français.");
+  return '';
+}
+const legalLinks = () => `<p class="small center mt2"><a href="#/legal/cgu">CGU</a> · <a href="#/legal/cgv">CGV</a> · <a href="#/legal/privacy">Confidentialité</a> · <a href="#/legal/mentions">Mentions légales</a></p>`;
+route('/legal/:k', k => {
+  if(!LEGAL_TITLES[k]) return go('#/');
+  const back = history.length > 1 ? null : '#/';
+  page(`<header class="top"><button class="iconbtn" aria-label="Retour" data-act="back">${I.back}</button><h1>${esc(LEGAL_TITLES[k])}</h1><span></span></header><main class="main"><h2 class="title">${esc(LEGAL_TITLES[k])}</h2><p class="small">Dernière mise à jour : octobre 2026</p><div style="font-size:14.5px">${legalHtml(k)}</div>${legalLinks()}</main>`);
+});
+ACT.back = () => { if(history.length > 1) history.back(); else go('#/'); };
+
+/* ============================ Notifications push (app iOS) ============================ */
+const isNative = () => !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+const PushPlugin = () => window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.PushNotifications;
+let pushListeners = false;
+async function initPush(ask){
+  const P = PushPlugin(); if(!isNative() || !P) return 'unsupported';
+  try{
+    if(!pushListeners){ pushListeners = true;
+      P.addListener('registration', t => { api('POST','/api/push/register',{token:t.value}).catch(()=>{}); });
+      P.addListener('registrationError', e => console.warn('push', e));
+      P.addListener('pushNotificationActionPerformed', a => { const u = a && a.notification && a.notification.data && a.notification.data.url; if(u) location.hash = u.startsWith('#') ? u : '#'+u; });
+      P.addListener('pushNotificationReceived', () => { if(STATE.me) render(); });
+    }
+    let st = (await P.checkPermissions()).receive;
+    if(st === 'prompt' && ask) st = (await P.requestPermissions()).receive;
+    if(st === 'granted') await P.register();
+    return st;
+  }catch(e){ console.warn('push', e); return 'error'; }
+}
+async function pushCard(){
+  const box = $('#pushcard'); if(!box) return;
+  const st = await initPush(false);
+  if(!document.body.contains(box)) return;
+  if(st === 'prompt' || st === 'prompt-with-rationale') box.innerHTML = `<div class="note" style="margin-bottom:14px">${I.info}<div><b>Soyez prévenu en quelques secondes.</b><br>Recevez une notification à chaque nouvelle demande.<button class="btn sm mt" data-act="pushon">Activer les notifications</button></div></div>`;
+  else if(st === 'denied') box.innerHTML = `<div class="note warn" style="margin-bottom:14px">${I.info}<div>Notifications désactivées. Pour les activer : Réglages de l'iPhone → LateCheck → Notifications.</div></div>`;
+  else box.innerHTML = '';
+}
+ACT.pushon = btn => withLock(btn, async () => { const st = await initPush(true); toast(st==='granted' ? 'Notifications activées' : 'Notifications non autorisées'); pushCard(); });
+
 render();
+if(isNative()) setTimeout(()=>{ if(STATE.me && STATE.me.role==='host') initPush(false); }, 1500);
 </script>
 </body>
 </html>
