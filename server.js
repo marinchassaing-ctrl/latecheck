@@ -73,7 +73,25 @@ CREATE TABLE IF NOT EXISTS stripe_events(id TEXT PRIMARY KEY, type TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `);
 const q = (sql) => db.prepare(sql);
-try { db.exec('ALTER TABLE requests ADD COLUMN payment_intent TEXT'); } catch (e) { /* colonne déjà présente */ }
+for (const sql of ['ALTER TABLE requests ADD COLUMN payment_intent TEXT', 'ALTER TABLE users ADD COLUMN stripe_mode TEXT', 'ALTER TABLE users ADD COLUMN terms_accepted_at INTEGER', 'ALTER TABLE requests ADD COLUMN cgv_accepted_at INTEGER']) {
+  try { db.exec(sql); } catch (e) { /* colonne déjà présente */ }
+}
+db.exec(`CREATE TABLE IF NOT EXISTS push_tokens(token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, platform TEXT NOT NULL, created_at INTEGER NOT NULL)`);
+
+/* Passage du mode test au mode réel : les comptes Stripe de test n'existent pas en réel.
+   On réinitialise les connexions Stripe et on efface les demandes et paiements fictifs.
+   Les comptes hôtes et les logements (donc les QR codes déjà imprimés) sont conservés. */
+(function switchStripeMode() {
+  const row = q("SELECT value FROM settings WHERE key='stripe_mode_seen'").get();
+  const seen = row ? JSON.parse(row.value) : (q('SELECT 1 FROM payments LIMIT 1').get() || q("SELECT 1 FROM users WHERE stripe_account IS NOT NULL").get() ? 'test' : STRIPE_MODE);
+  if (seen === 'test' && STRIPE_MODE === 'live') {
+    db.exec(`DELETE FROM payments; DELETE FROM requests; DELETE FROM emails; DELETE FROM stripe_events;
+             UPDATE users SET stripe_account=NULL, payouts_ready=0, details_submitted=0, stripe_mode=NULL;`);
+    console.log('🔁 Passage en mode réel : données de test effacées, les hôtes doivent reconnecter Stripe.');
+  }
+  q("UPDATE users SET stripe_account=NULL, payouts_ready=0, details_submitted=0 WHERE stripe_account IS NOT NULL AND COALESCE(stripe_mode,'test') <> ?").run(STRIPE_MODE);
+  q("INSERT INTO settings(key,value) VALUES('stripe_mode_seen',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(STRIPE_MODE));
+})();
 
 /* ------------------------------------------------------------------ Utilitaires */
 const now = () => Date.now();
@@ -96,6 +114,12 @@ function checkPw(pw, stored) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+const LEGAL = {
+  company: env.LEGAL_COMPANY || '[Raison sociale à compléter]', form: env.LEGAL_FORM || '[forme juridique]',
+  siren: env.LEGAL_SIREN || '[SIREN à compléter]', address: env.LEGAL_ADDRESS || '[adresse du siège à compléter]',
+  email: env.LEGAL_EMAIL || env.ADMIN_EMAIL || '[e-mail de contact]', director: env.LEGAL_DIRECTOR || '[directeur de la publication]',
+  vat: env.LEGAL_VAT || '', mediator: env.LEGAL_MEDIATOR || '[médiateur de la consommation à désigner]',
+};
 const DEFAULT_SETTINGS = { requestTtlMin: 120, payTtlMin: 60, stripePct: 0.015, stripeFixed: 25 };
 function getSettings() {
   const s = { ...DEFAULT_SETTINGS };
@@ -119,6 +143,51 @@ function sendEmail(to, subject, body) {
     headers: { Authorization: 'Bearer ' + env.RESEND_API_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({ from: env.EMAIL_FROM || 'LateCheck <onboarding@resend.dev>', to: [to], subject, text: body }),
   }).then((r) => { if (!r.ok) r.text().then((t) => console.error('Resend', r.status, t)); }).catch((e) => console.error('Resend', e.message));
+}
+
+/* ------------------------------------------------------------------ Notifications push iOS (APNs) */
+const http2 = require('node:http2');
+const APNS = {
+  keyId: env.APNS_KEY_ID, teamId: env.APNS_TEAM_ID, bundleId: env.APNS_BUNDLE_ID || 'fr.latecheck.app',
+  key: env.APNS_KEY_BASE64 ? Buffer.from(env.APNS_KEY_BASE64, 'base64').toString('utf8') : (env.APNS_KEY || '').replace(/\\n/g, '\n'),
+};
+APNS.enabled = !!(APNS.keyId && APNS.teamId && APNS.key.includes('PRIVATE KEY'));
+if (!APNS.enabled) console.warn('ℹ️  Notifications push désactivées (APNS_KEY_ID, APNS_TEAM_ID, APNS_KEY_BASE64).');
+let apnsJwt = null;
+function apnsToken() {
+  if (apnsJwt && now() - apnsJwt.at < 40 * 60000) return apnsJwt.token;
+  const enc = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const data = enc({ alg: 'ES256', kid: APNS.keyId }) + '.' + enc({ iss: APNS.teamId, iat: Math.floor(Date.now() / 1000) });
+  const sig = crypto.sign('sha256', Buffer.from(data), { key: APNS.key, dsaEncoding: 'ieee-p1363' }).toString('base64url');
+  apnsJwt = { token: data + '.' + sig, at: now() };
+  return apnsJwt.token;
+}
+function apnsSend(host, deviceToken, payload) {
+  return new Promise((resolve) => {
+    let client;
+    try { client = http2.connect(host); } catch (e) { return resolve({ status: 0, reason: e.message }); }
+    client.on('error', (e) => resolve({ status: 0, reason: e.message }));
+    const req = client.request({ ':method': 'POST', ':path': `/3/device/${deviceToken}`, authorization: `bearer ${apnsToken()}`,
+      'apns-topic': APNS.bundleId, 'apns-push-type': 'alert', 'apns-priority': '10', 'content-type': 'application/json' });
+    let status = 0, body = '';
+    req.on('response', (h) => { status = h[':status']; });
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => { client.close(); let reason = ''; try { reason = JSON.parse(body).reason || ''; } catch (_) {} resolve({ status, reason }); });
+    req.on('error', (e) => { client.close(); resolve({ status: 0, reason: e.message }); });
+    req.setTimeout(10000, () => { req.close(); });
+    req.end(JSON.stringify(payload));
+  });
+}
+async function sendPush(userId, title, body, url) {
+  if (!APNS.enabled) return;
+  const payload = { aps: { alert: { title, body }, sound: 'default' }, url: url || '#/h' };
+  for (const t of q('SELECT * FROM push_tokens WHERE user_id=?').all(userId)) {
+    // Builds Xcode = environnement de développement, TestFlight/App Store = production : on essaie les deux.
+    let r = await apnsSend('https://api.push.apple.com', t.token, payload);
+    if (r.status === 400 && /BadDeviceToken/.test(r.reason)) r = await apnsSend('https://api.sandbox.push.apple.com', t.token, payload);
+    if (r.status === 410 || /Unregistered|BadDeviceToken/.test(r.reason)) q('DELETE FROM push_tokens WHERE token=?').run(t.token);
+    else if (r.status !== 200) console.error('APNs', r.status, r.reason);
+  }
 }
 
 /* ------------------------------------------------------------------ Client Stripe (API REST) */
@@ -314,6 +383,7 @@ async function onCheckoutAuthorized(s) {
   }
   const l = q('SELECT * FROM listings WHERE id=?').get(r.listing_id);
   const host = q('SELECT * FROM users WHERE id=?').get(r.host_id);
+  sendPush(host.id, 'Nouvelle demande de départ tardif', `${r.guest_name} · ${hoursLabel(r.hours)} (jusqu'à ${r.new_time}) · ${eur(r.price)} · ${l.name}`, `#/h/requests/${r.id}`).catch((e) => console.error('push', e.message));
   sendEmail(host.email, 'Nouvelle demande de départ tardif', `${r.guest_name} demande ${hoursLabel(r.hours)} (départ à ${r.new_time}) le ${dayFr(r.date)} pour « ${l.name} ».\nLe paiement de ${eur(r.price)} est déjà réservé : acceptez pour l'encaisser.\nRépondez avant ${timeFr(exp)} : ${APP_URL}/#/h/requests/${r.id}`);
   sendEmail(r.guest_email, 'Votre demande a bien été envoyée', `Bonjour ${r.guest_name},\n\nVotre demande de départ à ${r.new_time} a été transmise à votre hôte.\n${eur(r.price)} sont réservés sur votre carte : ils ne seront prélevés que si votre hôte accepte.\nSuivre la demande : ${APP_URL}/#/r/${r.id}/${r.guest_token}`);
 }
@@ -425,7 +495,7 @@ route('GET', '/api/state', (req) => {
   sweep();
   const u = currentUser(req);
   const out = { me: null, hasAdmin: !!q("SELECT 1 FROM users WHERE role='admin'").get(), adminConfigured: !!ADMIN_EMAIL,
-    stripeMode: STRIPE_MODE, users: [], listings: [], requests: [], payments: [], emails: [], settings: getSettings(), guest: null };
+    stripeMode: STRIPE_MODE, pushEnabled: APNS.enabled, legal: LEGAL, users: [], listings: [], requests: [], payments: [], emails: [], settings: getSettings(), guest: null };
   if (u && u.status === 'active') {
     out.me = outUser(u);
     if (u.role === 'admin') {
@@ -465,9 +535,10 @@ route('POST', '/api/auth/signup', (req, res) => {
   if (!name || !isEmail(email)) fail(400, 'Renseignez un nom et un e-mail valide.');
   if (pw.length < 8) fail(400, 'Le mot de passe doit contenir au moins 8 caractères.');
   if (email === ADMIN_EMAIL) fail(400, 'Cet e-mail est réservé au compte administrateur.');
+  if (!req.body.acceptTerms) fail(400, "Acceptez les conditions générales d'utilisation pour créer votre compte.");
   if (q('SELECT 1 FROM users WHERE email=?').get(email)) fail(409, 'Un compte existe déjà avec cet e-mail.');
   const id = newId('usr_');
-  q("INSERT INTO users(id,role,name,email,pw,created_at) VALUES(?,'host',?,?,?,?)").run(id, name, email, hashPw(pw), now());
+  q("INSERT INTO users(id,role,name,email,pw,created_at,terms_accepted_at) VALUES(?,'host',?,?,?,?,?)").run(id, name, email, hashPw(pw), now(), now());
   sendEmail(email, 'Bienvenue sur LateCheck', `Bonjour ${name},\n\nVotre compte hôte est prêt. Connectez Stripe pour recevoir vos paiements, puis ajoutez votre premier logement.`);
   openSession(res, id);
 });
@@ -506,16 +577,23 @@ route('POST', '/api/stripe/connect', async (req) => {
       configuration: { recipient: { capabilities: { stripe_balance: { stripe_transfers: { requested: true } } } } },
       metadata: { latecheck_user: u.id },
     }, { idem: 'acctv2_' + u.id });
-    q('UPDATE users SET stripe_account=? WHERE id=?').run(a.id, u.id);
+    q('UPDATE users SET stripe_account=?, stripe_mode=? WHERE id=?').run(a.id, STRIPE_MODE, u.id);
     u = q('SELECT * FROM users WHERE id=?').get(u.id);
   }
-  const link = await stripeV2('POST', '/v2/core/account_links', {
+  const makeLink = () => stripeV2('POST', '/v2/core/account_links', {
     account: u.stripe_account,
     use_case: { type: 'account_onboarding', account_onboarding: {
       refresh_url: `${APP_URL}/#/h/account?stripe=refresh`,
       return_url: `${APP_URL}/#/h/account?stripe=return`,
     } },
   });
+  let link;
+  try { link = await makeLink(); }
+  catch (e) {
+    if (!/no such|not found|does not exist|resource_missing|invalid account/i.test(e.message)) throw e;
+    q('UPDATE users SET stripe_account=NULL, payouts_ready=0, details_submitted=0 WHERE id=?').run(u.id); // compte d'un autre mode : on recommence
+    fail(409, 'Votre ancienne connexion Stripe n\'est plus valable. Cliquez à nouveau sur « Connecter mon compte Stripe ».');
+  }
   return { url: link.url };
 });
 route('POST', '/api/stripe/refresh', async (req) => { const u = need(req, 'host'); const x = await syncAccount(u); return { payoutsReady: !!x.payouts_ready }; });
@@ -523,6 +601,35 @@ route('POST', '/api/stripe/dashboard', async (req) => {
   const u = need(req, 'host'); if (!u.stripe_account) fail(400, "Connectez d'abord votre compte Stripe.");
   const l = await stripe('POST', `/accounts/${u.stripe_account}/login_links`);
   return { url: l.url };
+});
+
+/* Notifications push : enregistrement de l'appareil */
+route('POST', '/api/push/register', (req) => {
+  const u = need(req, 'host');
+  const token = String(req.body.token || '');
+  if (!/^[0-9a-fA-F]{32,200}$/.test(token)) fail(400, 'Jeton de notification invalide.');
+  q("INSERT INTO push_tokens(token,user_id,platform,created_at) VALUES(?,?,'ios',?) ON CONFLICT(token) DO UPDATE SET user_id=excluded.user_id").run(token, u.id, now());
+  return { enabled: APNS.enabled };
+});
+
+/* Suppression du compte hôte (exigée par Apple, droit à l'effacement RGPD).
+   Les paiements passés sont conservés, anonymisés, pour les obligations comptables. */
+route('POST', '/api/account/delete', async (req, res) => {
+  const u = need(req, 'host');
+  if (!checkPw(String(req.body.password || ''), u.pw)) fail(403, 'Mot de passe incorrect.');
+  for (const r of q("SELECT * FROM requests WHERE host_id=? AND status IN ('pending','capturing','accepted','awaiting_payment')").all(u.id)) {
+    q("UPDATE requests SET status='cancelled', pay_token=NULL WHERE id=?").run(r.id);
+    if (r.payment_intent) await releaseHold(r.payment_intent);
+    if (r.status !== 'awaiting_payment') sendEmail(r.guest_email, 'Demande annulée', `Bonjour ${r.guest_name},\n\nCe logement n'accepte plus de demandes. Le montant réservé est libéré : rien n'a été prélevé.`);
+  }
+  q("UPDATE requests SET guest_name='Voyageur', guest_email='anonyme@latecheck.invalid', message=NULL WHERE host_id=?").run(u.id);
+  q('UPDATE listings SET deleted=1, paused=1, photo=NULL, name=?, address=? WHERE host_id=?').run('Logement supprimé', '', u.id);
+  q('DELETE FROM push_tokens WHERE user_id=?').run(u.id);
+  q('DELETE FROM sessions WHERE user_id=?').run(u.id);
+  q('DELETE FROM emails WHERE to_addr=?').run(u.email);
+  q("UPDATE users SET status='deleted', name='Compte supprimé', email=?, pw=?, stripe_account=NULL, payouts_ready=0 WHERE id=?")
+    .run(`supprime+${u.id}@latecheck.invalid`, hashPw(newToken()), u.id);
+  res.setHeader('Set-Cookie', 'lc_sid=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0');
 });
 
 /* Logements */
@@ -618,6 +725,7 @@ route('POST', '/api/public/requests', async (req) => {
   if (l.paused || host.status !== 'active' || !host.payouts_ready) fail(409, "Ce logement n'accepte pas de demandes pour le moment.");
   const hours = Number(b.hours), name = String(b.name || '').trim().slice(0, 40), email = String(b.email || '').trim().toLowerCase(), date = String(b.date || ''), message = String(b.message || '').trim().slice(0, 300);
   if (![1, 2, 3, 4].includes(hours)) fail(400, 'Durée invalide.');
+  if (!b.acceptCgv) fail(400, 'Acceptez les conditions générales de vente pour continuer.');
   if (!name || !isEmail(email)) fail(400, 'Renseignez votre prénom et un e-mail valide.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < todayParis()) fail(400, 'Choisissez une date de départ à venir.');
   const dup = q("SELECT * FROM requests WHERE listing_id=? AND guest_email=? AND date=? AND status IN ('pending','accepted','paid','capturing')").get(l.id, email, date);
@@ -626,9 +734,9 @@ route('POST', '/api/public/requests', async (req) => {
   let r = q("SELECT * FROM requests WHERE listing_id=? AND guest_email=? AND date=? AND hours=? AND status='awaiting_payment'").get(l.id, email, date, hours);
   if (!r) {
     const id = newId('req_');
-    q(`INSERT INTO requests(id,listing_id,host_id,guest_name,guest_email,guest_token,date,hours,price,old_time,new_time,message,status,created_at,expires_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'awaiting_payment',?,?)`)
-      .run(id, l.id, l.host_id, name, email, newToken(), date, hours, prices[hours], l.checkout, addHours(l.checkout, hours), message || null, now(), now() + 40 * 60000);
+    q(`INSERT INTO requests(id,listing_id,host_id,guest_name,guest_email,guest_token,date,hours,price,old_time,new_time,message,status,created_at,expires_at,cgv_accepted_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'awaiting_payment',?,?,?)`)
+      .run(id, l.id, l.host_id, name, email, newToken(), date, hours, prices[hours], l.checkout, addHours(l.checkout, hours), message || null, now(), now() + 40 * 60000, now());
     r = q('SELECT * FROM requests WHERE id=?').get(id);
   }
   try { return { id: r.id, guestToken: r.guest_token, url: await openCheckout(r) }; }
@@ -676,7 +784,7 @@ route('POST', '/api/public/pay/:token/checkout', async (req, _res, token) => {
 /* Administration */
 route('POST', '/api/admin/hosts/:id/toggle', (req, _res, id) => {
   need(req, 'admin');
-  const h = q("SELECT * FROM users WHERE id=? AND role='host'").get(id); if (!h) fail(404, 'Hôte introuvable.');
+  const h = q("SELECT * FROM users WHERE id=? AND role='host' AND status IN ('active','suspended')").get(id); if (!h) fail(404, 'Hôte introuvable ou compte supprimé.');
   q('UPDATE users SET status=? WHERE id=?').run(h.status === 'active' ? 'suspended' : 'active', id);
   if (h.status === 'active') q('DELETE FROM sessions WHERE user_id=?').run(id);
 });
