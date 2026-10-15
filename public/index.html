@@ -360,7 +360,7 @@ function daysSeries(payments, days, field){
 const statusPill = s => ({
   pending:'<span class="pill warn">En attente</span>', accepted:'<span class="pill warn">Paiement attendu</span>',
   paid:'<span class="pill ok">Payée</span>', refused:'<span class="pill bad">Refusée</span>', expired:'<span class="pill mute">Expirée</span>',
-  refunded:'<span class="pill mute">Remboursée</span>', cancelled:'<span class="pill mute">Annulée</span>',
+  refunded:'<span class="pill mute">Remboursée</span>', cancelled:'<span class="pill mute">Annulée</span>', capturing:'<span class="pill warn">Encaissement…</span>', awaiting_payment:'<span class="pill warn">Paiement à finaliser</span>', abandoned:'<span class="pill mute">Non finalisée</span>',
   succeeded:'<span class="pill ok">Réussi</span>', failed:'<span class="pill bad">Échoué</span>'
 }[s] || '');
 const methodLabel = p => p.method==='apple_pay' ? 'Apple Pay' : p.method==='google_pay' ? 'Google Pay' : p.last4 ? 'Carte •••• '+esc(p.last4) : 'Carte';
@@ -464,20 +464,21 @@ function reqCard(db,r){
   const l=listingById(db,r.listingId)||{};
   const actions = r.status==='pending' ? `<div class="row2 mt"><button class="btn danger sm" data-act="refuse" data-id="${r.id}">Refuser</button><button class="btn sm" data-act="accept" data-id="${r.id}">Accepter</button></div>`
     : r.status==='accepted' ? `<p class="small" style="margin:10px 0 0">Lien de paiement envoyé. Expire à ${fmtTime(r.payExpiresAt)}.</p>` : '';
+  const held = r.status==='pending' ? `<p class="small" style="margin:8px 0 0">${I.lock.replace(/24/g,'14')} Paiement déjà réservé : il est encaissé dès que vous acceptez.</p>` : '';
   return `<div class="card"><a href="#/h/requests/${r.id}" style="text-decoration:none;color:inherit;display:flex;gap:12px;align-items:center"><img class="thumb sm" src="${l.photo||PH}" alt=""><div class="grow"><div class="name">${esc(r.guestName)}</div><div class="meta">${esc(l.name||'')} · départ ${fmtDay(r.date)}</div></div>${statusPill(r.status)}</a>
-  <div class="split" style="margin-top:12px"><span>${hoursLabel(r.hours)} <span class="meta">(jusqu'à ${r.newTime})</span></span><b>${eur(r.price)}</b></div>${actions}</div>`;
+  <div class="split" style="margin-top:12px"><span>${hoursLabel(r.hours)} <span class="meta">(jusqu'à ${r.newTime})</span></span><b>${eur(r.price)}</b></div>${held}${actions}</div>`;
 }
 
 route('/h/requests', () => go('#/h/requests/tab/pending'));
 route('/h/requests/tab/:t', t => {
   const g=guard('host'); if(!g) return; const {db,u}=g;
   const R=hostRequests(db,u.id);
-  const groups={pending:R.filter(r=>r.status==='pending'), accepted:R.filter(r=>r.status==='accepted'), history:R.filter(r=>!['pending','accepted'].includes(r.status))};
+  const groups={pending:R.filter(r=>['pending','capturing','accepted'].includes(r.status)), history:R.filter(r=>!['pending','capturing','accepted'].includes(r.status))};
   const cur=groups[t]?t:'pending', list=groups[cur];
   const tab=(k,l)=>`<a href="#/h/requests/tab/${k}" class="${cur===k?'on':''}">${l} (${groups[k].length})</a>`;
   page(`${topBar({title:'Demandes'})}<main class="main">
-    <h2 class="title">Demandes ${cur==='pending'?'en attente':cur==='accepted'?'à payer':'traitées'}</h2>
-    <div class="tabs">${tab('pending','En attente')}${tab('accepted','Paiement attendu')}${tab('history','Historique')}</div>
+    <h2 class="title">Demandes ${cur==='pending'?'en attente':'traitées'}</h2>
+    <div class="tabs">${tab('pending','En attente')}${tab('history','Historique')}</div>
     ${list.length?`<div class="list">${list.map(r=>reqCard(db,r)).join('')}</div>`:`<div class="empty"><b>Rien ici pour le moment</b>${cur==='pending'?'Les nouvelles demandes de vos voyageurs arrivent dans cet onglet.':'Aucune demande dans cette catégorie.'}</div>`}
   </main>`, {nav:hostNav('req',db,u)});
 });
@@ -489,15 +490,15 @@ route('/h/requests/:id', id => {
     <div class="card split"><div style="display:flex;gap:12px;align-items:center;min-width:0"><div class="avatar">${esc(initials(r.guestName))}</div><div style="min-width:0"><div class="name">${esc(r.guestName)}</div><div class="meta">${esc(r.guestEmail)}</div></div></div><a class="btn soft sm" style="width:auto" href="mailto:${esc(r.guestEmail)}">Contacter</a></div>
     <div class="kv mt"><div><span>Logement</span><b>${esc(l.name||'')}</b></div><div><span>Date du départ</span><b>${fmtDay(r.date)}</b></div><div><span>Demande reçue</span><b>${fmtDT(r.createdAt)}</b></div><div><span>Durée demandée</span><b>${hoursLabel(r.hours)}</b></div><div><span>Départ prévu</span><b>${r.oldTime}</b></div><div><span>Nouvelle heure de départ</span><b>${r.newTime}</b></div><div class="total"><span>Montant</span><b>${eur(r.price)}</b></div><div><span>Statut</span><b>${statusPill(r.status)}</b></div></div>
     ${r.message?`<div class="card mt"><div class="meta" style="margin-bottom:6px">Message du voyageur</div>« ${esc(r.message)} »</div>`:''}
-    ${r.status==='pending'?`<p class="small mt">Sans réponse, la demande expire à ${fmtTime(r.expiresAt)}.</p><div class="row2 mt"><button class="btn danger" data-act="refuse" data-id="${r.id}">Refuser</button><button class="btn" data-act="accept" data-id="${r.id}">Accepter</button></div>`:''}
+    ${r.status==='pending'?`<div class="note mt">${I.lock.replace(/24/g,'20')}<div>Le voyageur a déjà réservé ${eur(r.price)} sur sa carte. Si vous acceptez, le paiement est encaissé immédiatement. Si vous refusez, rien n'est prélevé.</div></div><p class="small mt">Sans réponse, la demande expire à ${fmtTime(r.expiresAt)} et le montant est libéré.</p><div class="row2 mt"><button class="btn danger" data-act="refuse" data-id="${r.id}">Refuser</button><button class="btn" data-act="accept" data-id="${r.id}">Accepter</button></div>`:''}
   </main>`, {nav:hostNav('req',db,u)});
 });
 ACT.accept = btn => withLock(btn, async () => {
-  try{ await api('POST', `/api/requests/${btn.dataset.id}/accept`); toast('Demande acceptée. Lien de paiement envoyé au voyageur.'); }
+  try{ await api('POST', `/api/requests/${btn.dataset.id}/accept`); toast('Demande acceptée. Paiement encaissé, le voyageur est prévenu.'); }
   catch(e){ if(e.code==='STRIPE'){ toast(e.message); return go('#/h/account'); } toast(e.message); }
   render();
 });
-ACT.refuse = btn => { if(!confirm('Refuser cette demande ? Le voyageur sera prévenu et aucun paiement ne sera demandé.')) return;
+ACT.refuse = btn => { if(!confirm('Refuser cette demande ? Le voyageur sera prévenu et le montant réservé sera libéré.')) return;
   withLock(btn, async () => { try{ await api('POST', `/api/requests/${btn.dataset.id}/refuse`); toast('Demande refusée. Le voyageur est prévenu.'); }catch(e){ toast(e.message); } render(); }); };
 
 /* Logements */
@@ -770,7 +771,7 @@ route('/s/:slug', slug => {
       <h2>Envie de profiter de votre logement un peu plus longtemps ?</h2>
       <p class="sub" style="margin:0">Demandez un départ tardif en quelques secondes.</p>
       <div class="features"><div>${I.bolt}Simple et rapide</div><div>${I.lock}Paiement sécurisé</div><div>${I.cal}Selon l'accord de l'hôte</div></div>
-      ${available?`<button class="btn" data-act="gstart" data-slug="${esc(slug)}">Prolonger mon séjour</button><p class="small">Vous ne payez qu'après l'accord de votre hôte.</p>`
+      ${available?`<button class="btn" data-act="gstart" data-slug="${esc(slug)}">Prolonger mon séjour</button><p class="small">Le montant est réservé sur votre carte et prélevé seulement si votre hôte accepte.</p>`
         :`<div class="note warn">${I.info}<div>Les départs tardifs sont momentanément indisponibles pour ce logement.</div></div>`}
       ${mine.length?`<h3 class="sec" style="text-align:left">Mes demandes</h3><div class="list" style="text-align:left">${mine.map(({m,r})=>`<a class="item" href="#/r/${r.id}/${m.t}"><div class="grow"><div class="name">${hoursLabel(r.hours)} · jusqu'à ${r.newTime}</div><div class="meta">${fmtDay(r.date)}</div></div>${statusPill(r.status)}</a>`).join('')}</div>`:''}
     </div></main>`);
@@ -800,15 +801,19 @@ route('/s/:slug/recap', slug => {
     <label class="f" for="n">Prénom</label><input class="input" id="n" maxlength="40" autocomplete="given-name" value="${esc(d.name||'')}">
     <label class="f" for="e">E-mail</label><input class="input" id="e" type="email" autocomplete="email" value="${esc(d.email||'')}"><p class="hint">Pour recevoir la réponse de votre hôte et le lien de paiement.</p>
     <label class="f" for="m">Message pour votre hôte (facultatif)</label><textarea class="input" id="m" maxlength="300" placeholder="Merci beaucoup !">${esc(d.message||'')}</textarea>
-    <p class="err" id="err"></p><button class="btn mt" id="send">Envoyer ma demande</button>
-    <p class="small center">Aucun paiement maintenant. Vous paierez seulement si votre hôte accepte.</p>
+    <div class="note mt">${I.lock.replace(/24/g,'20')}<div>Le montant est <b>réservé</b> sur votre carte, pas prélevé. Il n'est encaissé que si votre hôte accepte. S'il refuse, il est libéré automatiquement.</div></div>
+    <p class="err" id="err"></p><button class="btn mt" id="send">${I.lock} Réserver ${eur(l.prices[h])} et envoyer ma demande</button>
+    <p class="small center">Carte bancaire, Apple Pay ou Google Pay, sur la page sécurisée Stripe.</p>
   </form></main>`);
   const saveDraft = () => setDraft({slug, hours:h, date:$('#dt').value, name:$('#n').value, email:$('#e').value, message:$('#m').value});
   $$('#f input, #f textarea').forEach(i=>i.addEventListener('input', saveDraft));
   $('#f').onsubmit = ev => { ev.preventDefault(); submitForm($('#send'), $('#err'), async () => {
     const r = await api('POST','/api/public/requests',{slug, hours:h, date:$('#dt').value, name:$('#n').value, email:$('#e').value, message:$('#m').value});
-    if(r.duplicate) toast('Vous avez déjà une demande pour cette date.');
-    rememberGuest(r.id, r.guestToken); setDraft(null); go('#/r/'+r.id+'/'+r.guestToken);
+    rememberGuest(r.id, r.guestToken);
+    if(r.duplicate){ toast('Vous avez déjà une demande pour cette date.'); setDraft(null); return go('#/r/'+r.id+'/'+r.guestToken); }
+    setDraft(null);
+    if(r.url){ location.href = r.url; await new Promise(()=>{}); }
+    go('#/r/'+r.id+'/'+r.guestToken+'?paid=1');
   }); };
 });
 route('/r/:id/:t', (id,t) => {
@@ -818,19 +823,24 @@ route('/r/:id/:t', (id,t) => {
   const l=listingById(STATE,r.listingId)||{}; const back=l.slug&&!l.deleted?`<a class="btn ghost" href="#/s/${l.slug}">Retour au logement</a>`:'';
   const justPaid = qp('paid')==='1';
   let body='';
-  if(r.status==='pending') body=`<div class="ico">${I.clock}</div><h2>Demande envoyée !</h2><p>Votre hôte va examiner votre demande de départ à ${r.newTime}. Cette page se met à jour dès sa réponse, et vous recevrez un e-mail.</p><div class="note">${I.info}<div>Aucun paiement n'est effectué pour le moment.</div></div><div class="mt">${back}</div>`;
+  if(r.status==='awaiting_payment' && justPaid) body=`<div class="ico"><span class="spin" style="width:36px;height:36px;border-width:3px"></span></div><h2>Confirmation en cours…</h2><p>Stripe nous transmet la réservation de votre paiement. Cela prend quelques secondes.</p>`;
+  else if(r.status==='awaiting_payment') body=`<div class="ico">${I.lock}</div><h2>Paiement non finalisé</h2><p>Votre demande n'a pas encore été envoyée à votre hôte. Réservez ${eur(r.price)} pour la transmettre.</p><button class="btn" data-act="resume" data-id="${r.id}" data-t="${esc(t)}">${I.lock} Reprendre le paiement</button><div class="mt">${back}</div>`;
+  else if(r.status==='abandoned') body=`<div class="ico bad">${I.x}</div><h2>Demande non envoyée</h2><p>Le paiement n'a pas été finalisé, rien n'a été prélevé. Vous pouvez refaire une demande.</p>${back}`;
+  else if(r.status==='pending' || r.status==='capturing') body=`<div class="ico">${I.clock}</div><h2>Demande envoyée !</h2><p>Votre hôte va examiner votre demande de départ à ${r.newTime}. Cette page se met à jour dès sa réponse, et vous recevrez un e-mail.</p><div class="note">${I.info}<div>${eur(r.price)} sont réservés sur votre carte. Ils ne seront prélevés que si votre hôte accepte.</div></div><div class="mt">${back}</div>`;
   else if(r.status==='accepted' && justPaid) body=`<div class="ico"><span class="spin" style="width:36px;height:36px;border-width:3px"></span></div><h2>Confirmation du paiement…</h2><p>Stripe nous transmet la confirmation de votre paiement. Cela prend généralement quelques secondes.</p>`;
   else if(r.status==='accepted') body=`<div class="ico pop">${I.check}</div><h2>Demande acceptée !</h2><p>Votre hôte accepte un départ à ${r.newTime}. Réglez ${eur(r.price)} avant ${fmtTime(r.payExpiresAt)} pour le confirmer.</p>${r.payToken?`<a class="btn" href="#/pay/${r.payToken}">Payer ${eur(r.price)}</a>`:''}<div class="note warn mt">${I.info}<div>Votre départ tardif n'est confirmé qu'après le paiement.</div></div>`;
-  else if(r.status==='paid') body=`<div class="ico pop">${I.check}</div><h2>Votre départ tardif est confirmé !</h2><p>Vous pouvez rester jusqu'à ${hFmt(r.newTime)}. Une confirmation vous a été envoyée par e-mail.</p><div class="kv" style="text-align:left"><div><span>Date</span><b>${fmtDay(r.date)}</b></div><div><span>Logement</span><b>${esc(l.name||'')}</b></div><div><span>Nouveau départ</span><b>${r.newTime}</b></div><div><span>Montant payé</span><b>${eur2(r.price)}</b></div></div><div class="mt">${back}</div>`;
-  else if(r.status==='refused') body=`<div class="ico bad">${I.x}</div><h2>Demande refusée</h2><p>Votre hôte ne peut pas accepter cette demande. Merci de libérer le logement à l'heure prévue (${r.oldTime}). Vous n'avez rien payé.</p>${back}`;
+  else if(r.status==='paid') body=`<div class="ico pop">${I.check}</div><h2>Votre départ tardif est confirmé !</h2><p>Votre hôte a accepté : vous pouvez rester jusqu'à ${hFmt(r.newTime)}. Une confirmation vous a été envoyée par e-mail.</p><div class="kv" style="text-align:left"><div><span>Date</span><b>${fmtDay(r.date)}</b></div><div><span>Logement</span><b>${esc(l.name||'')}</b></div><div><span>Nouveau départ</span><b>${r.newTime}</b></div><div><span>Montant payé</span><b>${eur2(r.price)}</b></div></div><div class="mt">${back}</div>`;
+  else if(r.status==='refused') body=`<div class="ico bad">${I.x}</div><h2>Demande refusée</h2><p>Votre hôte ne peut pas accepter cette demande. Le montant réservé est libéré, rien n'a été prélevé. Merci de libérer le logement à l'heure prévue (${r.oldTime}).</p>${back}`;
   else if(r.status==='refunded') body=`<div class="ico bad">${I.x}</div><h2>Paiement remboursé</h2><p>Votre paiement de ${eur2(r.price)} a été remboursé. Le départ tardif est annulé : départ à ${r.oldTime}.</p>${back}`;
-  else body=`<div class="ico bad">${I.clock}</div><h2>${r.status==='cancelled'?'Demande annulée':'Demande expirée'}</h2><p>${r.expiredReason==='payment'?'Le lien de paiement a expiré.':r.status==='cancelled'?"Ce logement n'accepte plus de demandes.":"Votre hôte n'a pas répondu à temps."} Aucun paiement n'a été effectué.</p>${back}`;
+  else body=`<div class="ico bad">${I.clock}</div><h2>${r.status==='cancelled'?'Demande annulée':'Demande expirée'}</h2><p>${r.expiredReason==='payment'?'Le lien de paiement a expiré.':r.status==='cancelled'?"Ce logement n'accepte plus de demandes.":"Votre hôte n'a pas répondu à temps."} Le montant réservé est libéré, rien n'a été prélevé.</p>${back}`;
   page(`${guestTop()}<main class="main"><div class="state">${body}</div></main>`);
-  if(['pending','accepted'].includes(r.status)){
+  if(['pending','accepted','capturing','awaiting_payment'].includes(r.status) && (r.status!=='awaiting_payment' || justPaid)){
     const st=r.status; const qs='/api/state?rid='+encodeURIComponent(id)+'&rt='+encodeURIComponent(t);
     pollTimer=setInterval(async ()=>{ try{ const s=await api('GET',qs); const x=s.requests.find(z=>z.id===id); if(x && x.status!==st) render(); }catch(e){} }, justPaid ? 1500 : 4000);
   }
 });
+
+ACT.resume = btn => withLock(btn, async () => { const r=await api('POST',`/api/public/requests/${btn.dataset.id}/checkout`,{t:btn.dataset.t}); if(r.url){ location.href=r.url; await new Promise(()=>{}); } render(); });
 
 /* Paiement : redirection vers Stripe Checkout (carte, Apple Pay, Google Pay) */
 route('/pay/:tok', tok => {
