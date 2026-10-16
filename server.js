@@ -73,9 +73,16 @@ CREATE TABLE IF NOT EXISTS stripe_events(id TEXT PRIMARY KEY, type TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `);
 const q = (sql) => db.prepare(sql);
-for (const sql of ['ALTER TABLE requests ADD COLUMN payment_intent TEXT', 'ALTER TABLE users ADD COLUMN stripe_mode TEXT', 'ALTER TABLE users ADD COLUMN terms_accepted_at INTEGER', 'ALTER TABLE requests ADD COLUMN cgv_accepted_at INTEGER']) {
+for (const sql of ['ALTER TABLE payments ADD COLUMN invoice_id TEXT', 'ALTER TABLE users ADD COLUMN billing TEXT', 'ALTER TABLE requests ADD COLUMN payment_intent TEXT', 'ALTER TABLE users ADD COLUMN stripe_mode TEXT', 'ALTER TABLE users ADD COLUMN terms_accepted_at INTEGER', 'ALTER TABLE requests ADD COLUMN cgv_accepted_at INTEGER']) {
   try { db.exec(sql); } catch (e) { /* colonne déjà présente */ }
 }
+db.exec(`CREATE TABLE IF NOT EXISTS invoices(
+  id TEXT PRIMARY KEY, number TEXT NOT NULL UNIQUE, type TEXT NOT NULL, host_id TEXT NOT NULL, month TEXT NOT NULL,
+  issued_at INTEGER NOT NULL, sales INTEGER NOT NULL, commission INTEGER NOT NULL, fees INTEGER NOT NULL,
+  ttc INTEGER NOT NULL, ht INTEGER NOT NULL, vat INTEGER NOT NULL, vat_rate REAL NOT NULL, count INTEGER NOT NULL,
+  ref TEXT, payment_id TEXT, customer TEXT NOT NULL, seller TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS inv_one_month ON invoices(host_id, month) WHERE type='facture';
+CREATE UNIQUE INDEX IF NOT EXISTS inv_one_credit ON invoices(payment_id) WHERE type='avoir';`);
 db.exec(`CREATE TABLE IF NOT EXISTS push_tokens(token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, platform TEXT NOT NULL, created_at INTEGER NOT NULL)`);
 
 /* Passage du mode test au mode réel : les comptes Stripe de test n'existent pas en réel.
@@ -85,7 +92,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS push_tokens(token TEXT PRIMARY KEY, user_id 
   const row = q("SELECT value FROM settings WHERE key='stripe_mode_seen'").get();
   const seen = row ? JSON.parse(row.value) : (q('SELECT 1 FROM payments LIMIT 1').get() || q("SELECT 1 FROM users WHERE stripe_account IS NOT NULL").get() ? 'test' : STRIPE_MODE);
   if (seen === 'test' && STRIPE_MODE === 'live') {
-    db.exec(`DELETE FROM payments; DELETE FROM requests; DELETE FROM emails; DELETE FROM stripe_events;
+    db.exec(`DELETE FROM invoices; DELETE FROM settings WHERE key LIKE 'invoice_seq_%'; DELETE FROM payments; DELETE FROM requests; DELETE FROM emails; DELETE FROM stripe_events;
              UPDATE users SET stripe_account=NULL, payouts_ready=0, details_submitted=0, stripe_mode=NULL;`);
     console.log('🔁 Passage en mode réel : données de test effacées, les hôtes doivent reconnecter Stripe.');
   }
@@ -118,7 +125,8 @@ const LEGAL = {
   company: env.LEGAL_COMPANY || '[Raison sociale à compléter]', form: env.LEGAL_FORM || '[forme juridique]',
   siren: env.LEGAL_SIREN || '[SIREN à compléter]', address: env.LEGAL_ADDRESS || '[adresse du siège à compléter]',
   email: env.LEGAL_EMAIL || env.ADMIN_EMAIL || '[e-mail de contact]', director: env.LEGAL_DIRECTOR || '[directeur de la publication]',
-  vat: env.LEGAL_VAT || '', mediator: env.LEGAL_MEDIATOR || '[médiateur de la consommation à désigner]',
+  vat: env.LEGAL_VAT || '', capital: env.LEGAL_CAPITAL || '', rcs: env.LEGAL_RCS || '',
+  vatRate: Math.max(0, Number(env.LEGAL_VAT_RATE || 0)), mediator: env.LEGAL_MEDIATOR || '[médiateur de la consommation à désigner]',
 };
 const DEFAULT_SETTINGS = { requestTtlMin: 120, payTtlMin: 60, stripePct: 0.015, stripeFixed: 25 };
 function getSettings() {
@@ -190,6 +198,226 @@ async function sendPush(userId, title, body, url) {
   }
 }
 
+/* ------------------------------------------------------------------ Factures de commission (mensuelles) et avoirs */
+const parisMonth = (t) => new Date(t).toLocaleDateString('sv-SE', { timeZone: 'Europe/Paris' }).slice(0, 7);
+const parisDate = (t) => new Date(t).toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris' });
+const monthFr = (m) => { const [y, mo] = m.split('-'); return new Date(Date.UTC(+y, +mo - 1, 15)).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric', timeZone: 'UTC' }); };
+function nextInvoiceNumber() {
+  const y = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Paris' }).slice(0, 4), k = 'invoice_seq_' + y;
+  const r = q('SELECT value FROM settings WHERE key=?').get(k), n = (r ? JSON.parse(r.value) : 0) + 1;
+  q('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, JSON.stringify(n));
+  return `LC-${y}-${String(n).padStart(6, '0')}`;
+}
+function customerSnapshot(u) {
+  let b = {}; try { b = JSON.parse(u.billing || '{}') || {}; } catch (e) {}
+  return JSON.stringify({ name: u.name, email: u.email, company: b.company || '', address: b.address || '', siren: b.siren || '', vat: b.vat || '' });
+}
+const sellerSnapshot = () => JSON.stringify(LEGAL);
+function splitVat(ttc) { const ht = Math.round(ttc / (1 + LEGAL.vatRate / 100)); return { ht, vat: ttc - ht }; }
+/* Émet les factures des mois clos (appelé régulièrement). Numérotation continue par année. */
+function issueInvoices() {
+  const cur = parisMonth(now()), groups = {};
+  for (const p of q("SELECT * FROM payments WHERE status='succeeded' AND invoice_id IS NULL").all()) {
+    const m = parisMonth(p.created_at); if (m >= cur) continue;
+    (groups[p.host_id + '|' + m] = groups[p.host_id + '|' + m] || []).push(p);
+  }
+  for (const [k, ps] of Object.entries(groups)) {
+    const [hostId, m] = k.split('|');
+    const host = q('SELECT * FROM users WHERE id=?').get(hostId);
+    if (!host || q("SELECT 1 FROM invoices WHERE host_id=? AND month=? AND type='facture'").get(hostId, m)) continue;
+    const commission = ps.reduce((a, p) => a + p.commission, 0), fees = ps.reduce((a, p) => a + p.stripe_fee, 0);
+    const ttc = commission + fees, { ht, vat } = splitVat(ttc), id = newId('inv_');
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      q(`INSERT INTO invoices(id,number,type,host_id,month,issued_at,sales,commission,fees,ttc,ht,vat,vat_rate,count,customer,seller)
+         VALUES(?,?,'facture',?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, nextInvoiceNumber(), hostId, m, now(), ps.reduce((a, p) => a + p.amount, 0),
+        commission, fees, ttc, ht, vat, LEGAL.vatRate, ps.length, customerSnapshot(host), sellerSnapshot());
+      for (const p of ps) q('UPDATE payments SET invoice_id=? WHERE id=?').run(id, p.id);
+      db.exec('COMMIT');
+      if (host.status === 'active') sendEmail(host.email, `Votre facture LateCheck de ${monthFr(m)}`, `Bonjour ${host.name},\n\nVotre facture de commission LateCheck pour ${monthFr(m)} est disponible dans l'application, rubrique Revenus → Factures et relevés.\nVentes : ${eur(ps.reduce((a, p) => a + p.amount, 0))} · commission et frais : ${eur(ttc)}.`);
+    } catch (e) { db.exec('ROLLBACK'); console.error('facture', e.message); }
+  }
+}
+/* Remboursement d'une vente déjà facturée : avoir immédiat */
+function issueCreditNote(p) {
+  if (!p.invoice_id || q("SELECT 1 FROM invoices WHERE payment_id=? AND type='avoir'").get(p.id)) return;
+  const inv = q('SELECT * FROM invoices WHERE id=?').get(p.invoice_id), host = q('SELECT * FROM users WHERE id=?').get(p.host_id);
+  if (!inv || !host) return;
+  const ttc = -(p.commission + p.stripe_fee), { ht, vat } = splitVat(ttc);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    q(`INSERT INTO invoices(id,number,type,host_id,month,issued_at,sales,commission,fees,ttc,ht,vat,vat_rate,count,ref,payment_id,customer,seller)
+       VALUES(?,?,'avoir',?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)`).run(newId('inv_'), nextInvoiceNumber(), p.host_id, parisMonth(now()), now(),
+      -p.amount, -p.commission, -p.stripe_fee, ttc, ht, vat, inv.vat_rate, inv.number, p.id, customerSnapshot(host), sellerSnapshot());
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); console.error('avoir', e.message); }
+}
+setInterval(() => { try { issueInvoices(); } catch (e) { console.error('factures', e); } }, 10 * 60000).unref();
+setTimeout(() => { try { issueInvoices(); } catch (e) { console.error('factures', e); } }, 5000).unref();
+
+/* Mini-générateur PDF (Helvetica, A4), sans dépendance */
+const PDF_W = { ' ': 278, ',': 278, '.': 278, '-': 333, '%': 889, '€': 556, '(': 333, ')': 333, '/': 278, ':': 278, '·': 278 };
+function textW(s, size, bold) { let w = 0; for (const ch of String(s)) w += /[0-9]/.test(ch) ? 556 : (PDF_W[ch] || (/[A-Z]/.test(ch) ? 667 : /[il.,'!|]/.test(ch) ? 240 : bold ? 590 : 540)); return w / 1000 * size; }
+function pdfStr(s) {
+  const map = { '€': '\x80', '’': '\x92', '‘': '\x91', '“': '\x93', '”': '\x94', '–': '\x96', '—': '\x97', '…': '\x85', 'œ': '\x9c', 'Œ': '\x8c', '\u202f': ' ', '\u00a0': ' ' };
+  let o = ''; for (const ch of String(s ?? '')) { if (map[ch] !== undefined) o += map[ch]; else o += ch.charCodeAt(0) < 256 ? ch : '?'; }
+  return o.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+}
+function pdfDoc() {
+  const pages = []; let c = '';
+  const INK = '0.09 0.15 0.11', MUTED = '0.40 0.46 0.42', GREEN = '0.18 0.36 0.26';
+  const d = {
+    INK, MUTED, GREEN,
+    text(x, y, s, { size = 9.5, bold = false, color = INK, align = 'left', max = 0 } = {}) {
+      s = String(s ?? ''); if (max) while (s.length > 3 && textW(s, size, bold) > max) s = s.slice(0, -2).trimEnd() + '…';
+      const xx = align === 'right' ? x - textW(s, size, bold) : align === 'center' ? x - textW(s, size, bold) / 2 : x;
+      c += `BT /${bold ? 'F2' : 'F1'} ${size} Tf ${color} rg ${xx.toFixed(2)} ${y.toFixed(2)} Td (${pdfStr(s)}) Tj ET\n`;
+    },
+    wrap(x, y, s, width, opts = {}) { const size = opts.size || 9.5, words = String(s).split(' '); let line = '', yy = y;
+      for (const w of words) { const t = line ? line + ' ' + w : w; if (textW(t, size, opts.bold) > width && line) { d.text(x, yy, line, opts); yy -= size * 1.35; line = w; } else line = t; }
+      if (line) { d.text(x, yy, line, opts); yy -= size * 1.35; } return yy; },
+    line(x1, y1, x2, y2, w = 0.6, color = '0.86 0.89 0.86') { c += `${color} RG ${w} w ${x1} ${y1} m ${x2} ${y2} l S\n`; },
+    rect(x, y, w, h, color = '0.93 0.95 0.93') { c += `${color} rg ${x} ${y} ${w} ${h} re f\n`; },
+    page() { if (c) pages.push(c); c = ''; },
+    end() {
+      if (c) pages.push(c);
+      const objs = [null, null];
+      const add = (o) => { objs.push(o); return objs.length; };
+      const f1 = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+      const f2 = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
+      const kids = pages.map((pc) => { const cs = add(`<< /Length ${Buffer.byteLength(pc, 'latin1')} >>\nstream\n${pc}\nendstream`);
+        return add(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${f1} 0 R /F2 ${f2} 0 R >> >> /Contents ${cs} 0 R >>`); });
+      objs[0] = '<< /Type /Catalog /Pages 2 0 R >>';
+      objs[1] = `<< /Type /Pages /Kids [${kids.map((k) => k + ' 0 R').join(' ')}] /Count ${kids.length} >>`;
+      let out = '%PDF-1.4\n%\xe2\xe3\xcf\xd3\n'; const offs = [];
+      objs.forEach((o, i) => { offs.push(Buffer.byteLength(out, 'latin1')); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+      const xref = Buffer.byteLength(out, 'latin1');
+      out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n` + offs.map((o) => String(o).padStart(10, '0') + ' 00000 n \n').join('') +
+        `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+      return Buffer.from(out, 'latin1');
+    },
+  };
+  return d;
+}
+const eurPdf = (c) => (c / 100).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+function invoiceTransactions(inv) {
+  const sql = `SELECT p.*, r.guest_name, r.hours, r.date, l.name AS lname FROM payments p JOIN requests r ON r.id=p.request_id JOIN listings l ON l.id=p.listing_id`;
+  return inv.type === 'avoir' ? q(sql + ' WHERE p.id=?').all(inv.payment_id) : q(sql + ' WHERE p.invoice_id=? ORDER BY p.created_at').all(inv.id);
+}
+function invoicePdf(inv) {
+  const S = JSON.parse(inv.seller), C = JSON.parse(inv.customer), d = pdfDoc(), M = 50, R = 545, avoir = inv.type === 'avoir';
+  const footer = (n) => { d.line(M, 52, R, 52); d.text(M, 38, `${S.company} · ${S.form} · SIREN ${S.siren} · ${S.address}`, { size: 7.5, color: d.MUTED, max: 430 }); d.text(R, 38, `Page ${n}`, { size: 7.5, color: d.MUTED, align: 'right' }); };
+  // En-tête
+  d.text(M, 790, 'LateCheck', { size: 22, bold: true, color: d.GREEN });
+  d.text(R, 792, avoir ? 'AVOIR' : 'FACTURE', { size: 18, bold: true, align: 'right' });
+  d.text(R, 774, `N° ${inv.number}`, { size: 10, align: 'right', bold: true });
+  d.text(R, 760, `Date d'émission : ${parisDate(inv.issued_at)}`, { size: 9, align: 'right', color: d.MUTED });
+  if (avoir) d.text(R, 747, `Avoir sur la facture N° ${inv.ref}`, { size: 9, align: 'right', color: d.MUTED });
+  // Émetteur
+  let y = 730;
+  d.text(M, y, 'Émetteur', { size: 8, color: d.MUTED }); y -= 14;
+  d.text(M, y, S.company, { bold: true }); y -= 13;
+  d.text(M, y, `${S.form}${S.capital ? ' au capital de ' + S.capital : ''}`, { size: 9 }); y -= 12;
+  y = d.wrap(M, y, S.address, 230, { size: 9 });
+  d.text(M, y, `SIREN ${S.siren}${S.rcs ? ' · RCS ' + S.rcs : ''}`, { size: 9 }); y -= 12;
+  if (S.vat) { d.text(M, y, `TVA intracommunautaire : ${S.vat}`, { size: 9 }); y -= 12; }
+  d.text(M, y, S.email, { size: 9 });
+  // Client
+  d.rect(315, 640, 230, 104);
+  let yc = 730;
+  d.text(327, yc, 'Facturé à', { size: 8, color: d.MUTED }); yc -= 14;
+  d.text(327, yc, C.company || C.name, { bold: true, max: 205 }); yc -= 13;
+  if (C.company) { d.text(327, yc, C.name, { size: 9, max: 205 }); yc -= 12; }
+  if (C.address) yc = d.wrap(327, yc, C.address, 205, { size: 9 });
+  if (C.siren) { d.text(327, yc, `SIREN ${C.siren}`, { size: 9 }); yc -= 12; }
+  if (C.vat) { d.text(327, yc, `TVA ${C.vat}`, { size: 9 }); yc -= 12; }
+  d.text(327, yc, C.email, { size: 9, max: 205 });
+  // Période
+  y = 610;
+  d.text(M, y, avoir ? `Remboursement du ${parisDate(inv.issued_at)}` : `Période facturée : ${monthFr(inv.month)} (du 1er au dernier jour du mois)`, { size: 10, bold: true });
+  // Tableau
+  y = 582; d.rect(M, y - 6, R - M, 20, '0.93 0.95 0.93');
+  const cols = [M + 8, 330, 390, 455, R - 8];
+  d.text(cols[0], y, 'Désignation', { size: 8.5, bold: true }); d.text(cols[1], y, 'Qté', { size: 8.5, bold: true, align: 'right' });
+  d.text(cols[2] + 20, y, 'PU HT', { size: 8.5, bold: true, align: 'right' }); d.text(cols[3], y, 'TVA', { size: 8.5, bold: true, align: 'right' });
+  d.text(cols[4], y, 'Total HT', { size: 8.5, bold: true, align: 'right' });
+  const lines = [
+    [avoir ? `Annulation de la commission LateCheck (10 %) sur une vente remboursée de ${eurPdf(-inv.sales)}` : `Commission de service LateCheck : 10 % des ventes encaissées (${eurPdf(inv.sales)}, ${inv.count} vente${inv.count > 1 ? 's' : ''})`, inv.commission],
+    [avoir ? 'Annulation des frais de traitement des paiements' : 'Frais de traitement des paiements par carte', inv.fees],
+  ];
+  y -= 26;
+  for (const [label, ttc] of lines) {
+    const ht = Math.round(ttc / (1 + inv.vat_rate / 100));
+    const yy = d.wrap(cols[0], y, label, 250, { size: 9 });
+    d.text(cols[1], y, '1', { size: 9, align: 'right' }); d.text(cols[2] + 20, y, eurPdf(ht), { size: 9, align: 'right' });
+    d.text(cols[3], y, `${inv.vat_rate} %`, { size: 9, align: 'right' }); d.text(cols[4], y, eurPdf(ht), { size: 9, align: 'right' });
+    y = Math.min(yy, y - 14) - 6; d.line(M, y + 8, R, y + 8);
+  }
+  // Totaux
+  y -= 8;
+  const tot = (label, val, bold) => { d.text(430, y, label, { size: bold ? 10.5 : 9.5, bold, align: 'right' }); d.text(R - 8, y, eurPdf(val), { size: bold ? 10.5 : 9.5, bold, align: 'right' }); y -= bold ? 18 : 15; };
+  tot('Total HT', inv.ht); tot(`TVA (${inv.vat_rate} %)`, inv.vat); d.line(330, y + 10, R, y + 10); tot(avoir ? 'Total TTC à déduire' : 'Total TTC', inv.ttc, true);
+  // Mentions
+  y -= 6;
+  const mentions = [];
+  if (!inv.vat_rate) mentions.push('TVA non applicable, article 293 B du Code général des impôts.');
+  mentions.push(avoir ? 'Montant recrédité : la commission et les frais ont été restitués lors du remboursement du voyageur.'
+    : `Facture acquittée : montant prélevé automatiquement sur vos encaissements, au moment de chaque vente, via Stripe. Montant net versé sur votre compte : ${eurPdf(inv.sales - inv.ttc)}.`);
+  mentions.push("Pénalités de retard : trois fois le taux d'intérêt légal. Indemnité forfaitaire pour frais de recouvrement : 40 € (clients professionnels). Pas d'escompte pour paiement anticipé.");
+  for (const m of mentions) y = d.wrap(M, y, m, R - M, { size: 8.5, color: d.MUTED }) - 4;
+  // Récapitulatif
+  if (!avoir) {
+    y -= 10; d.rect(M, y - 52, R - M, 62);
+    d.text(M + 12, y - 8, `Récapitulatif de ${monthFr(inv.month)}`, { size: 10, bold: true });
+    const box = [['Ventes encaissées', inv.sales], ['Commission et frais LateCheck', inv.ttc], ['Net versé', inv.sales - inv.ttc]];
+    box.forEach(([l, v], i) => { const x = M + 12 + i * 165; d.text(x, y - 26, l, { size: 8, color: d.MUTED }); d.text(x, y - 42, eurPdf(v), { size: 12, bold: true, color: i === 2 ? d.GREEN : d.INK }); });
+  }
+  footer(1);
+  // Annexe : détail des transactions
+  const tx = invoiceTransactions(inv);
+  let page = 1, rowY = 0;
+  const head = () => { d.page(); page++; d.text(M, 790, `Détail des transactions · ${avoir ? 'avoir ' : 'facture '}${inv.number}`, { size: 13, bold: true });
+    d.text(M, 774, avoir ? 'Vente remboursée' : `Ventes encaissées en ${monthFr(inv.month)}`, { size: 9, color: d.MUTED });
+    rowY = 746; d.rect(M, rowY - 6, R - M, 20, '0.93 0.95 0.93');
+    [['Date', M + 6, 'left'], ['Voyageur', 108, 'left'], ['Logement', 180, 'left'], ['Départ', 310, 'left'], ['Payé', 418, 'right'], ['LateCheck', 482, 'right'], ['Net', R - 6, 'right']]
+      .forEach(([t, x, a]) => d.text(x, rowY, t, { size: 8.5, bold: true, align: a })); rowY -= 22; };
+  head();
+  for (const t of tx) {
+    if (rowY < 80) { footer(page); head(); }
+    const fee = t.commission + t.stripe_fee;
+    d.text(M + 6, rowY, parisDate(t.created_at), { size: 8.5 }); d.text(108, rowY, t.guest_name, { size: 8.5, max: 66 });
+    d.text(180, rowY, t.lname, { size: 8.5, max: 122 }); d.text(310, rowY, `${t.date.slice(8, 10)}/${t.date.slice(5, 7)} · +${t.hours} h`, { size: 8.5 });
+    d.text(418, rowY, eurPdf(t.amount), { size: 8.5, align: 'right' }); d.text(482, rowY, eurPdf(fee), { size: 8.5, align: 'right' });
+    d.text(R - 6, rowY, eurPdf(t.amount - fee), { size: 8.5, align: 'right' }); rowY -= 6; d.line(M, rowY, R, rowY); rowY -= 12;
+  }
+  rowY -= 6; d.text(418, rowY, eurPdf(tx.reduce((a, t) => a + t.amount, 0)), { size: 9, bold: true, align: 'right' });
+  d.text(482, rowY, eurPdf(tx.reduce((a, t) => a + t.commission + t.stripe_fee, 0)), { size: 9, bold: true, align: 'right' });
+  d.text(R - 6, rowY, eurPdf(tx.reduce((a, t) => a + t.amount - t.commission - t.stripe_fee, 0)), { size: 9, bold: true, align: 'right' });
+  footer(page);
+  return d.end();
+}
+function monthCsv(hostId, month) {
+  const c = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"', n = (x) => ((x || 0) / 100).toFixed(2).replace('.', ',');
+  const rows = [['Date', 'Voyageur', 'Logement', 'Date du départ', 'Durée (h)', 'Montant payé (€)', 'Commission LateCheck (€)', 'Frais de paiement (€)', 'Net versé (€)', 'Statut', 'Facture']];
+  const all = q(`SELECT p.*, r.guest_name, r.hours, r.date, l.name AS lname, i.number AS inv FROM payments p JOIN requests r ON r.id=p.request_id
+    JOIN listings l ON l.id=p.listing_id LEFT JOIN invoices i ON i.id=p.invoice_id WHERE p.host_id=? AND p.status IN ('succeeded','refunded') ORDER BY p.created_at`).all(hostId);
+  for (const p of all.filter((p) => parisMonth(p.created_at) === month)) {
+    const ok = p.status === 'succeeded';
+    rows.push([new Date(p.created_at).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' }), p.guest_name, p.lname, p.date, p.hours, n(p.amount),
+      ok ? n(p.commission) : '0,00', ok ? n(p.stripe_fee) : '0,00', ok ? n(p.net) : '0,00', ok ? 'Encaissé' : 'Remboursé', p.inv || '']);
+  }
+  return '\uFEFF' + rows.map((r) => r.map(c).join(';')).join('\r\n');
+}
+/* Liens de téléchargement signés (valables 15 min) : ouvrables hors session, ex. dans Safari depuis l'app */
+const DOC_SECRET = env.DOC_SECRET || crypto.createHash('sha256').update('latecheck-docs:' + STRIPE_KEY).digest('hex');
+function signDoc(payload) { const b = Buffer.from(JSON.stringify({ ...payload, exp: now() + 15 * 60000 })).toString('base64url'); return b + '.' + crypto.createHmac('sha256', DOC_SECRET).update(b).digest('base64url'); }
+function readDoc(t) {
+  const [b, sig] = String(t).split('.'); if (!b || !sig) return null;
+  const exp = crypto.createHmac('sha256', DOC_SECRET).update(b).digest('base64url');
+  if (sig.length !== exp.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(exp))) return null;
+  const p = JSON.parse(Buffer.from(b, 'base64url').toString('utf8')); return p.exp > now() ? p : null;
+}
+
 /* ------------------------------------------------------------------ Client Stripe (API REST) */
 function formEncode(obj, prefix, out = []) {
   for (const [k, v] of Object.entries(obj)) {
@@ -249,7 +477,8 @@ function verifyStripeSignature(raw, header) {
 }
 
 /* ------------------------------------------------------------------ Sérialisation (ce que le navigateur reçoit) */
-const outUser = (u) => ({ id: u.id, role: u.role, name: u.name, email: u.email, status: u.status, stripeAccount: u.stripe_account, payoutsReady: !!u.payouts_ready, detailsSubmitted: !!u.details_submitted, createdAt: u.created_at });
+const parseJson = (s) => { try { return JSON.parse(s || '{}') || {}; } catch (e) { return {}; } };
+const outUser = (u) => ({ billing: parseJson(u.billing), id: u.id, role: u.role, name: u.name, email: u.email, status: u.status, stripeAccount: u.stripe_account, payoutsReady: !!u.payouts_ready, detailsSubmitted: !!u.details_submitted, createdAt: u.created_at });
 const outListing = (l) => ({ id: l.id, hostId: l.host_id, name: l.name, address: l.address, photo: l.photo, checkout: l.checkout, prices: JSON.parse(l.prices), paused: !!l.paused, deleted: !!l.deleted, slug: l.slug, createdAt: l.created_at });
 const outRequest = (r, asGuest = false) => ({
   id: r.id, listingId: r.listing_id, hostId: r.host_id, guestName: r.guest_name, guestEmail: r.guest_email,
@@ -394,6 +623,7 @@ function markRefunded(paymentId) {
   if (!p || !q("UPDATE payments SET status='refunded', refunded_at=? WHERE id=? AND status='succeeded'").run(now(), p.id).changes) return false;
   const r = q('SELECT * FROM requests WHERE id=?').get(p.request_id);
   q("UPDATE requests SET status='refunded' WHERE id=?").run(p.request_id);
+  issueCreditNote(p);
   const host = q('SELECT * FROM users WHERE id=?').get(p.host_id);
   if (r) sendEmail(r.guest_email, 'Remboursement de votre départ tardif', `Bonjour ${r.guest_name},\n\n${eur(p.amount)} vous ont été remboursés. Le départ tardif est annulé : merci de libérer le logement à ${r.old_time}.`);
   if (host) sendEmail(host.email, 'Paiement remboursé', `Le paiement de ${eur(p.amount)} de ${r ? r.guest_name : 'votre voyageur'} a été remboursé.`);
@@ -601,6 +831,49 @@ route('POST', '/api/stripe/dashboard', async (req) => {
   const u = need(req, 'host'); if (!u.stripe_account) fail(400, "Connectez d'abord votre compte Stripe.");
   const l = await stripe('POST', `/accounts/${u.stripe_account}/login_links`);
   return { url: l.url };
+});
+
+/* Factures et relevés */
+route('GET', '/api/invoices', (req) => {
+  const u = need(req, 'host'); issueInvoices();
+  const cur = parisMonth(now()), curPays = q("SELECT * FROM payments WHERE host_id=? AND status='succeeded' AND invoice_id IS NULL").all(u.id).filter((p) => parisMonth(p.created_at) === cur);
+  return {
+    invoices: q('SELECT id, number, type, month, issued_at, sales, ttc, count, ref FROM invoices WHERE host_id=? ORDER BY issued_at DESC').all(u.id),
+    current: { month: cur, sales: curPays.reduce((a, p) => a + p.amount, 0), fees: curPays.reduce((a, p) => a + p.commission + p.stripe_fee, 0), count: curPays.length },
+  };
+});
+route('PUT', '/api/account/billing', (req) => {
+  const u = need(req, 'host'), b = req.body || {}, clean = (v, n) => String(v || '').trim().slice(0, n);
+  const billing = { company: clean(b.company, 100), address: clean(b.address, 200), siren: clean(b.siren, 20).replace(/\s/g, ''), vat: clean(b.vat, 20).replace(/\s/g, '').toUpperCase() };
+  if (billing.siren && !/^\d{9}$/.test(billing.siren)) fail(400, 'Le SIREN doit contenir 9 chiffres.');
+  q('UPDATE users SET billing=? WHERE id=?').run(JSON.stringify(billing), u.id);
+});
+route('POST', '/api/docs/link', (req) => {
+  const u = need(req, 'host'), b = req.body || {};
+  if (b.kind === 'invoice') {
+    const inv = q('SELECT * FROM invoices WHERE id=? AND host_id=?').get(String(b.id || ''), u.id); if (!inv) fail(404, 'Facture introuvable.');
+    return { url: `${APP_URL}/api/docs/${signDoc({ k: 'invoice', id: inv.id, u: u.id })}` };
+  }
+  if (b.kind === 'csv') {
+    if (!/^\d{4}-\d{2}$/.test(String(b.month || ''))) fail(400, 'Mois invalide.');
+    return { url: `${APP_URL}/api/docs/${signDoc({ k: 'csv', m: b.month, u: u.id })}` };
+  }
+  fail(400, 'Document inconnu.');
+});
+route('GET', '/api/docs/:t', (req, res, t) => {
+  const p = readDoc(t);
+  if (!p) { res.writeHead(410, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('Lien expiré. Retournez dans LateCheck et touchez à nouveau le document.'); return; }
+  if (p.k === 'invoice') {
+    const inv = q('SELECT * FROM invoices WHERE id=? AND host_id=?').get(p.id, p.u); if (!inv) fail(404, 'Facture introuvable.');
+    const pdf = invoicePdf(inv);
+    res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': pdf.length, 'Content-Disposition': `inline; filename="${inv.number}.pdf"`, 'Cache-Control': 'private, no-store' });
+    res.end(pdf); return;
+  }
+  if (p.k === 'csv') {
+    res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="latecheck-releve-${p.m}.csv"`, 'Cache-Control': 'private, no-store' });
+    res.end(monthCsv(p.u, p.m)); return;
+  }
+  fail(404, 'Document inconnu.');
 });
 
 /* Notifications push : enregistrement de l'appareil */
