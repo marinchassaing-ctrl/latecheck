@@ -2,9 +2,10 @@
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>LateCheck</title>
-<meta name="theme-color" content="#FFFFFF">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#FFFFFF">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101813">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="LateCheck">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -16,6 +17,7 @@
   --green:#2E5B43; --green-2:#3E7255; --sage:#A8BDA6; --sage-soft:#EDF3EC; --btn:#2E5B43; --btn-ink:#FFFFFF;
   --danger:#C2412F; --danger-soft:#FBECEA; --warn:#A8661A; --warn-soft:#FCF1E1; --ok:#2E7A4F; --ok-soft:#E6F3EA;
   --r-lg:20px; --r-md:14px; --r-sm:10px;
+  --ease-out:cubic-bezier(.23,1,.32,1); --ease-in-out:cubic-bezier(.77,0,.175,1); --ease-drawer:cubic-bezier(.32,.72,0,1);
   color-scheme:light;
   box-sizing:border-box; padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
 }
@@ -34,6 +36,7 @@
   color-scheme:dark;
 }
 *,*::before,*::after{box-sizing:border-box}
+html{-webkit-tap-highlight-color:transparent}
 html,body{height:100%;margin:0;overflow-x:clip;overscroll-behavior:none;-webkit-text-size-adjust:100%;text-size-adjust:100%}
 body{background:var(--bg);color:var(--ink);font-family:"Figtree",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:15px;line-height:1.45;-webkit-font-smoothing:antialiased}
 #app{max-width:480px;min-height:100%;margin:0 auto;background:var(--bg);position:relative;display:flex;flex-direction:column}
@@ -50,7 +53,7 @@ img{max-width:100%;display:block}
 .top h1{margin:0;text-align:center;font-size:17px;font-weight:700;letter-spacing:-.01em}
 .top .brand{text-align:left;padding-left:10px;font-size:19px}
 .iconbtn{width:44px;height:44px;border:0;background:none;border-radius:12px;display:grid;place-items:center;cursor:pointer;color:var(--ink)}
-.iconbtn:hover{background:var(--surface)}
+@media (hover:hover) and (pointer:fine){.iconbtn:hover{background:var(--surface)}}
 .main{flex:1;padding:8px 20px 28px}
 .has-nav .main{padding-bottom:96px}
 
@@ -64,8 +67,8 @@ h2.title{font-size:26px;line-height:1.15;letter-spacing:-.02em;margin:10px 0 6px
 h3.sec{font-size:17px;margin:26px 0 10px;font-weight:700;display:flex;justify-content:space-between;align-items:baseline}
 h3.sec a{font-size:14px;font-weight:600;text-decoration:none}
 
-.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:50px;border:0;border-radius:var(--r-md);background:var(--btn);color:var(--btn-ink);font-weight:600;font-size:16px;cursor:pointer;text-decoration:none;padding:0 16px;transition:transform .08s, opacity .2s}
-.btn:active{transform:scale(.985)}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:50px;border:0;border-radius:var(--r-md);background:var(--btn);color:var(--btn-ink);font-weight:600;font-size:16px;cursor:pointer;text-decoration:none;padding:0 16px;transition:transform 160ms var(--ease-out), opacity 200ms var(--ease-out)}
+.btn:active{transform:scale(.97)}
 .btn[disabled],.btn.busy{opacity:.55;pointer-events:none}
 .btn.soft{background:var(--sage-soft);color:var(--green)}
 .btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
@@ -88,7 +91,7 @@ h3.sec a{font-size:14px;font-weight:600;text-decoration:none}
 
 .list{display:flex;flex-direction:column;gap:10px}
 .item{display:flex;gap:12px;align-items:center;border:1px solid var(--line);border-radius:var(--r-md);padding:10px;text-decoration:none;color:inherit;background:var(--bg)}
-a.item:hover{border-color:var(--sage)}
+@media (hover:hover) and (pointer:fine){a.item:hover{border-color:var(--sage)}}
 .thumb{width:58px;height:58px;border-radius:11px;object-fit:cover;flex:none;background:var(--sage-soft)}
 .thumb.sm{width:44px;height:44px;border-radius:10px}
 .grow{flex:1;min-width:0}
@@ -114,6 +117,8 @@ a.item:hover{border-color:var(--sage)}
 label.f{display:block;font-size:14px;font-weight:600;margin:16px 0 6px}
 .input{width:100%;min-height:48px;font-size:16px;border:1px solid var(--line);background:var(--surface);border-radius:var(--r-sm);padding:0 14px;outline:none}
 textarea.input{padding:12px 14px;min-height:84px;resize:vertical}
+input.input[type=date],input.input[type=time]{-webkit-appearance:none;appearance:none;display:block;min-width:0;max-width:100%;text-align:left;line-height:48px}
+input.input::-webkit-date-and-time-value{text-align:left}
 .input:focus{border-color:var(--green);background:var(--bg)}
 .hint{font-size:12.5px;color:var(--muted);margin-top:6px}
 .err{color:var(--danger);font-size:14px;margin-top:10px;min-height:1px}
@@ -162,8 +167,8 @@ textarea.input{padding:12px 14px;min-height:84px;resize:vertical}
 
 .toggle{position:relative;width:50px;height:30px;flex:none}
 .toggle input{opacity:0;width:0;height:0}
-.toggle span{position:absolute;inset:0;background:var(--line);border-radius:999px;cursor:pointer;transition:.2s}
-.toggle span::before{content:"";position:absolute;width:24px;height:24px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.toggle span{position:absolute;inset:0;background:var(--line);border-radius:999px;cursor:pointer;transition:background-color 200ms ease}
+.toggle span::before{content:"";position:absolute;width:24px;height:24px;left:3px;top:3px;background:#fff;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.2);transition:transform 220ms var(--ease-out)}
 .toggle input:checked+span{background:var(--green-2)}
 .toggle input:checked+span::before{transform:translateX(20px)}
 .menu{border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden}
@@ -193,12 +198,58 @@ textarea.input{padding:12px 14px;min-height:84px;resize:vertical}
 .chips{display:flex;gap:6px;flex-wrap:wrap}
 .chips button{border:0;background:var(--surface);color:var(--muted);font-weight:600;font-size:13.5px;padding:8px 13px;border-radius:999px;cursor:pointer}
 .chips button.on{background:var(--btn);color:var(--btn-ink)}
-#toast{position:fixed;left:50%;bottom:calc(92px + env(safe-area-inset-bottom,0px));transform:translateX(-50%) translateY(20px);background:var(--ink);color:var(--bg);padding:11px 16px;border-radius:12px;font-size:14px;font-weight:500;opacity:0;pointer-events:none;transition:.25s;z-index:20;max-width:90%;text-align:center}
-#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-.spin{width:18px;height:18px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:sp .7s linear infinite}
+.share-ov{position:fixed;inset:0;background:rgba(10,20,14,.45);display:flex;align-items:flex-end;justify-content:center;z-index:30;padding:0 12px calc(12px + env(safe-area-inset-bottom,0px))}
+.share-box{background:var(--bg);border-radius:22px;padding:20px;width:100%;max-width:456px;box-shadow:0 10px 40px rgba(0,0,0,.25)}
+#intro{position:fixed;inset:0;z-index:100;background:#F4F8F2;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+#intro .stage{display:flex;flex-direction:column;align-items:center;will-change:transform,opacity}
+#intro svg{width:min(46vw,210px);height:auto;overflow:visible}
+#intro .word{margin-top:22px;font:700 34px/1 -apple-system,BlinkMacSystemFont,"Helvetica Neue",Helvetica,Arial,sans-serif;letter-spacing:-.02em;color:#22503B;opacity:0;animation:lcUp .45s cubic-bezier(.2,.8,.2,1) 1.05s both}
+#intro .tag{margin-top:10px;font:400 15px/1.3 -apple-system,BlinkMacSystemFont,"Helvetica Neue",Helvetica,Arial,sans-serif;color:#5C6B61;opacity:0;animation:lcUp .45s cubic-bezier(.2,.8,.2,1) 1.18s both}
+#intro .arc{stroke-dasharray:1;stroke-dashoffset:1;animation:lcDraw .62s cubic-bezier(.55,0,.25,1) .08s forwards}
+#intro .chk{stroke-dasharray:1;stroke-dashoffset:1;animation:lcDraw .34s cubic-bezier(.4,0,.2,1) .98s forwards}
+#intro .hands{opacity:0;transform:scale(.5);animation:lcGrow .34s cubic-bezier(.34,1.4,.64,1) .42s forwards}
+#intro .mn{animation:lcSpin .6s cubic-bezier(.65,0,.35,1) .6s both}
+#intro .logo{animation:lcPop .42s cubic-bezier(.3,1.6,.5,1) 1.22s both}
+#intro.out .stage{animation:lcZoom .46s var(--ease-in-out) forwards}
+#intro.out{animation:lcFade .28s var(--ease-out) .16s forwards}
+@keyframes lcDraw{to{stroke-dashoffset:0}}
+@keyframes lcGrow{to{opacity:1;transform:scale(1)}}
+@keyframes lcSpin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+@keyframes lcPop{0%{transform:scale(1)}45%{transform:scale(1.07)}100%{transform:scale(1)}}
+@keyframes lcUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
+@keyframes lcZoom{0%{transform:scale(1)}22%{transform:scale(.94)}100%{transform:scale(12);opacity:0}}
+@keyframes lcFade{to{opacity:0}}
+#intro.quick .arc,#intro.quick .chk{animation:none;stroke-dashoffset:0}
+#intro.quick .hands,#intro.quick .mn,#intro.quick .logo,#intro.quick .word,#intro.quick .tag{animation:none;opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){#intro *{animation:none!important;stroke-dashoffset:0!important;opacity:1!important;transform:none!important}#intro.out .stage{animation:none!important}#intro.out{animation:lcFade .3s forwards!important}}
+/* Comportement natif sur téléphone (skill mobile-native) */
+a,button,label,.btn,[role="button"]{touch-action:manipulation}
+.btn,.iconbtn,.nav a,.tabs a,.chips button,.choice,.stepper button,.menu>a,.menu>button,.menu>label,a.stat,a.item,.pill,.toggle{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+a.item,a.stat,.choice,.chips button,.tabs a,.iconbtn,.stepper button,.nav a{transition:transform 160ms var(--ease-out), background-color 160ms ease, border-color 160ms ease}
+a.item:active,a.stat:active,.choice:active{transform:scale(.98)}
+.chips button:active,.tabs a:active,.stepper button:active{transform:scale(.95)}
+.iconbtn:active{transform:scale(.92)}
+.nav a:active{transform:scale(.94)}
+.menu>a,.menu>button,.menu>label{transition:background-color 120ms ease}
+.menu>a:active,.menu>button:active,.menu>label:active{background:var(--surface)}
+.share-ov{animation:ovIn 200ms var(--ease-out) both}
+.share-box{animation:sheetIn 420ms var(--ease-drawer) both}
+.share-ov.closing{animation:ovOut 160ms ease-out both}
+.share-ov.closing .share-box{animation:sheetOut 180ms var(--ease-out) both}
+@keyframes ovIn{from{opacity:0}}
+@keyframes ovOut{to{opacity:0}}
+@keyframes sheetIn{from{transform:translateY(100%)}}
+@keyframes sheetOut{to{transform:translateY(100%)}}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition-duration:1ms!important}
+  .pop,.share-box,.share-ov.closing .share-box{animation:ovIn 200ms ease both!important}
+}
+#toast{position:fixed;left:50%;bottom:calc(92px + env(safe-area-inset-bottom,0px));transform:translateX(-50%) translateY(20px);background:var(--ink);color:var(--bg);padding:11px 16px;border-radius:12px;font-size:14px;font-weight:500;opacity:0;pointer-events:none;transition:opacity 150ms ease-out, transform 150ms ease-out;z-index:20;max-width:90%;text-align:center}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0);transition-duration:240ms;transition-timing-function:var(--ease-out)}
+.spin{width:18px;height:18px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:sp .6s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
-.pop{animation:pop .45s cubic-bezier(.2,1.4,.4,1)}
-@keyframes pop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
+.pop{animation:pop 380ms cubic-bezier(.34,1.4,.64,1) both}
+@keyframes pop{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}
 @media (prefers-reduced-motion:reduce){.pop,.spin{animation:none}.btn{transition:none}}
 
 #print-area{display:none}
@@ -404,7 +455,7 @@ route('/signup', () => {
   page(`${topBar({title:'Inscription', back:'#/'})}<main class="main"><form id="f" novalidate>
     <h2 class="title">Votre compte hôte</h2><p class="sub">Quelques secondes suffisent.</p>
     <label class="f" for="n">Prénom et nom</label><input class="input" id="n" autocomplete="name" placeholder="Ex : Marin Dupont">
-    <label class="f" for="e">E-mail</label><input class="input" id="e" type="email" autocomplete="email" placeholder="vous@exemple.fr">
+    <label class="f" for="e">E-mail</label><input class="input" id="e" type="email" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="next" autocomplete="email" placeholder="vous@exemple.fr">
     <label class="f" for="p">Mot de passe</label><input class="input" id="p" type="password" autocomplete="new-password" placeholder="8 caractères minimum">
     <label class="mt" style="display:flex;gap:10px;align-items:flex-start;font-size:14px;cursor:pointer"><input type="checkbox" id="t" style="width:20px;height:20px;accent-color:var(--green);flex:none;margin-top:1px"><span>J'accepte les <a href="#/legal/cgu">conditions générales d'utilisation</a> et la <a href="#/legal/privacy">politique de confidentialité</a>.</span></label>
     <p class="err" id="err"></p><button class="btn mt" id="b">Créer mon compte</button>
@@ -415,7 +466,7 @@ route('/signup', () => {
 route('/login', () => {
   page(`${topBar({title:'Connexion', back:'#/'})}<main class="main"><form id="f" novalidate>
     <h2 class="title">Bon retour</h2><p class="sub">Connectez-vous à votre espace.</p>
-    <label class="f" for="e">E-mail</label><input class="input" id="e" type="email" autocomplete="email">
+    <label class="f" for="e">E-mail</label><input class="input" id="e" type="email" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="next" autocomplete="email">
     <label class="f" for="p">Mot de passe</label><input class="input" id="p" type="password" autocomplete="current-password">
     <p class="err" id="err"></p><button class="btn mt" id="b">Se connecter</button>
     <p class="center small mt">Pas encore de compte ? <a href="#/signup">S'inscrire</a></p>
@@ -428,7 +479,7 @@ route('/setup-admin', () => {
   page(`${topBar({title:'Administrateur', back:'#/'})}<main class="main"><form id="f" novalidate>
     <h2 class="title">Compte administrateur</h2><p class="sub">Utilisez l'e-mail défini dans ADMIN_EMAIL sur le serveur. Ce compte ne peut être créé qu'une fois.</p>
     <label class="f" for="n">Nom</label><input class="input" id="n" value="Administrateur LateCheck">
-    <label class="f" for="e">E-mail</label><input class="input" id="e" type="email" autocomplete="email">
+    <label class="f" for="e">E-mail</label><input class="input" id="e" type="email" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="next" autocomplete="email">
     <label class="f" for="p">Mot de passe</label><input class="input" id="p" type="password" autocomplete="new-password" placeholder="10 caractères minimum">
     <p class="err" id="err"></p><button class="btn mt" id="b">Créer le compte administrateur</button>
   </form></main>`);
@@ -657,8 +708,8 @@ route('/h/listings/:id/qr', id => {
     <div class="optrow"><span>Style</span>${posterChips('style',o.style,Object.entries(P_STYLES).map(([k,v])=>[k,v.label]))}</div>
     <div class="optrow"><span>Accroche</span>${posterChips('head',o.head,Object.entries(P_HEADS).map(([k,v])=>[k,v.label]))}</div>
     <div class="optrow"><span>Langue</span>${posterChips('lang',o.lang,[['fr','Français'],['fren','Français + anglais']])}</div>
-    <div class="stack mt"><button class="btn" data-act="posterprint" data-id="${l.id}">${I.print} Imprimer l'affiche (A5)</button>
-    <div class="row2"><button class="btn soft sm" data-act="posterdl" data-id="${l.id}">${I.dl} Télécharger</button><button class="btn soft sm" data-act="copylink" data-url="${esc(guestUrl(l))}">${I.link} Copier le lien</button></div>
+    <div class="stack mt"><button class="btn" data-act="posterprint" data-id="${l.id}">${I.print} Imprimer l'affiche${isNative()?'':' (A5)'}</button>
+    <div class="row2"><button class="btn soft sm" data-act="posterdl" data-id="${l.id}">${I.dl} ${isNative()?'Enregistrer':'Télécharger'}</button><button class="btn soft sm" data-act="copylink" data-url="${esc(guestUrl(l))}">${I.link} Copier le lien</button></div>
     <a class="btn ghost" href="#/s/${l.slug}">Tester comme un voyageur</a></div>
     <h3 class="sec">Où la placer</h3>
     <div class="kv"><div><span>Porte d'entrée, côté intérieur</span><b>vue en faisant les valises</b></div><div><span>À côté des clés ou de la boîte à clés</span><b>vue au départ</b></div><div><span>Table de nuit ou miroir de salle de bain</span><b>vue le soir et le matin</b></div></div>
@@ -668,7 +719,7 @@ route('/h/listings/:id/qr', id => {
       <button class="btn soft sm" data-act="copymsg" data-id="${l.id}">${I.mail} Copier le message</button></div>
     ${l.paused?`<div class="note warn mt">${I.info}<div>Ce logement est en pause : les voyageurs verront que les demandes sont indisponibles.</div></div>`:''}
   </main>`, {nav:hostNav('lst',db,u)});
-  const refreshPreview = async () => { const c=await posterCanvas(l, posterOpts(l.id)); const im=$('#pv'); if(im) im.src=c.toDataURL('image/jpeg',.86); };
+  const refreshPreview = async () => { const a=await posterAsset(l); const im=$('#pv'); if(im) im.src=a.jpg; };
   refreshPreview();
   $$('.chips[data-opt]').forEach(group => group.addEventListener('click', e => {
     const b=e.target.closest('button[data-v]'); if(!b) return;
@@ -680,10 +731,53 @@ function drawQR(el, text, size){
   if(typeof QRCode==='undefined'){ el.innerHTML='<p class="small">Le générateur de QR code n\'a pas pu se charger. Rechargez la page.</p>'; return null; }
   return new QRCode(el,{text, width:size, height:size, colorDark:'#17261D', colorLight:'#FFFFFF', correctLevel:QRCode.CorrectLevel.M});
 }
-const slugName = l => l.name.toLowerCase().normalize('NFD').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,40);
-ACT.posterdl = async btn => { const l=findOwnListing(btn.dataset.id); if(!l) return; const c=await posterCanvas(l, posterOpts(l.id));
+/* Partage natif (app iOS) : la vue web d'Apple bloque impression et téléchargement directs */
+async function shareOrOffer(file, title, fallback){
+  let can=false; try{ can=!!(navigator.share && navigator.canShare && navigator.canShare({files:[file]})); }catch(e){}
+  if(!can){ fallback(); return; }
+  try{ await navigator.share({files:[file], title}); }
+  catch(e){ if(e && e.name==='AbortError') return; if(e && e.name==='NotAllowedError'){ offerShare(file,title); return; } fallback(); }
+}
+function offerShare(file, title){
+  const d=document.createElement('div'); d.className='share-ov';
+  d.innerHTML=`<div class="share-box"><div class="name" style="font-size:17px">${esc(title)}</div><p class="small" style="margin:6px 0 14px">Votre document est prêt.</p><button class="btn" data-x="s">${I.dl} Imprimer, enregistrer ou partager</button><button class="btn ghost mt" data-x="c">Fermer</button></div>`;
+  document.body.appendChild(d);
+  const close=()=>{ if(d.classList.contains('closing')) return; d.classList.add('closing'); setTimeout(()=>d.remove(),190); };
+  d.onclick=async e=>{ const x=e.target.closest('[data-x]'); if(e.target===d || (x && x.dataset.x==='c')) return close(); if(x && x.dataset.x==='s'){ try{ await navigator.share({files:[file],title}); }catch(_){} close(); } };
+}
+/* Impression directe AirPrint (module natif LatePrint de l'app iOS) */
+function LatePrint(){
+  const C=window.Capacitor; if(!C || !isNative()) return null;
+  try{ if(C.isPluginAvailable && !C.isPluginAvailable('LatePrint')) return null; return C.registerPlugin ? C.registerPlugin('LatePrint') : (C.Plugins && C.Plugins.LatePrint) || null; }catch(e){ return null; }
+}
+const blobToBase64 = blob => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result).split(',')[1]); r.onerror=rej; r.readAsDataURL(blob); });
+async function nativePrint(blob, type, name){
+  const P=LatePrint(); if(!P) return false;
+  try{ await P.printFile({data: await blobToBase64(blob), type, name}); return true; }
+  catch(e){ console.warn('impression', e); return false; }
+}
+let POSTER_CACHE=null;
+async function posterAsset(l){
+  const o=posterOpts(l.id), key=[l.id,JSON.stringify(o),l.name,l.checkout,JSON.stringify(l.prices)].join('|');
+  if(POSTER_CACHE && POSTER_CACHE.key===key) return POSTER_CACHE;
+  const c=await posterCanvas(l,o); const blob=await new Promise(r=>c.toBlob(r,'image/png'));
+  POSTER_CACHE={key, blob, jpg:c.toDataURL('image/jpeg',.9)}; return POSTER_CACHE;
+}
+function posterViewer(l, jpg){
+  page(`${topBar({title:'Votre affiche', back:'#/h/listings/'+l.id+'/qr'})}<main class="main">
+    <div class="note">${I.info}<div>Appuyez longuement sur l'affiche, puis choisissez <b>Enregistrer dans Photos</b>, ou <b>Partager</b> → <b>Imprimer</b>.</div></div>
+    <img src="${jpg}" alt="Affiche LateCheck" style="width:100%;margin-top:14px;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,.15);-webkit-touch-callout:default"></main>`);
+}
+async function sharePoster(l){
+  const a=await posterAsset(l);
+  const file=new File([a.blob], 'affiche-latecheck-'+slugName(l)+'.png', {type:'image/png'});
+  return shareOrOffer(file, 'Affiche LateCheck · '+l.name, ()=>posterViewer(l, a.jpg));
+}
+const slugName = l => l.name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,40);
+ACT.posterdl = async btn => { const l=findOwnListing(btn.dataset.id); if(!l) return; if(isNative()) return sharePoster(l); const c=await posterCanvas(l, posterOpts(l.id));
   c.toBlob(b => saveBlob('affiche-latecheck-'+slugName(l)+'.png', b), 'image/png'); };
-ACT.posterprint = async btn => { const l=findOwnListing(btn.dataset.id); if(!l) return; const c=await posterCanvas(l, posterOpts(l.id));
+ACT.posterprint = async btn => { const l=findOwnListing(btn.dataset.id); if(!l) return;
+  if(isNative()){ const a=await posterAsset(l); if(await nativePrint(a.blob,'image','Affiche LateCheck · '+l.name)) return; return sharePoster(l); } const c=await posterCanvas(l, posterOpts(l.id));
   $('#print-area').innerHTML=`<img src="${c.toDataURL('image/png')}" alt="Affiche LateCheck">`;
   setTimeout(()=>{ try{ window.print(); }catch(e){ toast("Impression bloquée ici : téléchargez l'affiche puis imprimez-la."); } }, 80); };
 ACT.copymsg = async btn => { const l=findOwnListing(btn.dataset.id); if(!l) return; const t=guestMessage(l);
@@ -724,6 +818,8 @@ route('/h/revenue/:m', m => {
     <div class="stats"><div class="stat"><b>${S.length}</b><span>ventes</span></div><div class="stat"><b>${S.length?eur(Math.round(sum(S,p=>p.amount)/S.length)):'–'}</b><span>panier moyen</span></div><div class="stat"><b>${P.filter(p=>p.status==='refunded').length}</b><span>remboursées</span></div></div>
     <div class="kv mt"><div><span>Total des ventes</span><b>${eur2(sum(S,p=>p.amount))}</b></div><div><span>Commission LateCheck (10 %)</span><b class="neg">− ${eur2(sum(S,p=>p.commission))}</b></div><div><span>Frais de paiement</span><b class="neg">− ${eur2(sum(S,p=>p.stripeFee))}</b></div><div class="total"><span>Montant net</span><b>${eur2(sum(S,p=>p.net))}</b></div></div>
     ${u.payoutsReady?`<button class="btn soft sm mt" data-act="stripedash">${I.bank} Voir mes virements sur Stripe</button>`:''}
+    <h3 class="sec">Factures et relevés</h3>
+    <div id="invbox"><div class="empty"><span class="spin" style="color:var(--green)"></span></div></div>
     <h3 class="sec">Évolution</h3>${chart(vals,labels)}
     <h3 class="sec">Historique des transactions</h3>
     ${P.length?`<div class="list">${P.map(p=>{ const r=db.requests.find(x=>x.id===p.requestId)||{}; const l=listingById(db,p.listingId)||{};
@@ -733,6 +829,40 @@ route('/h/revenue/:m', m => {
       :`<div class="empty"><b>Aucune transaction ce mois-ci</b>Partagez votre QR code pour recevoir vos premières demandes.</div>`}
   </main>`, {nav:hostNav('rev',db,u)});
   $('#mo').onchange = e => go('#/h/revenue/'+e.target.value);
+  loadInvoices(u);
+});
+async function loadInvoices(u){
+  const box=$('#invbox'); if(!box) return;
+  try{
+    const r=await api('GET','/api/invoices'); if(!document.body.contains(box)) return;
+    const b=u.billing||{};
+    const cur=r.current;
+    const nextFirst=(()=>{ const [y,m]=cur.month.split('-').map(Number); return new Date(y,m,1).toLocaleDateString('fr-FR',{day:'numeric',month:'long'}).replace(/^1 /,'1er '); })();
+    box.innerHTML=`
+      ${(!b.company && !b.address)?`<a class="note" href="#/h/account/billing" style="text-decoration:none;margin-bottom:12px">${I.info}<div><b>Complétez vos informations de facturation</b><br>Société, adresse, SIREN : elles apparaîtront sur vos prochaines factures.</div></a>`:''}
+      <div class="list">
+        <div class="item"><div class="grow"><div class="name">${monthLabel(cur.month)} · en cours</div><div class="meta">${cur.count} vente${cur.count>1?'s':''} · facture émise le ${nextFirst}</div></div>
+          <button class="btn soft sm" style="width:auto" data-act="doc" data-kind="csv" data-month="${cur.month}">CSV</button></div>
+        ${r.invoices.map(i=>`<div class="item"><div class="grow"><div class="name">${i.type==='avoir'?'Avoir':'Facture'} ${monthLabel(i.month)}</div>
+          <div class="meta">${esc(i.number)} · ${i.type==='avoir'?`sur ${esc(i.ref)} · `:`${i.count} vente${i.count>1?'s':''} · `}LateCheck ${eur2(i.ttc)}</div></div>
+          <div style="display:flex;gap:6px"><button class="btn soft sm" style="width:auto" data-act="doc" data-kind="invoice" data-id="${i.id}" data-number="${esc(i.number)}">PDF</button>${i.type==='facture'?`<button class="btn ghost sm" style="width:auto" data-act="doc" data-kind="csv" data-month="${i.month}">CSV</button>`:''}</div></div>`).join('')}
+      </div>
+      <p class="hint">Chaque facture détaille votre commission LateCheck, avec en annexe la liste de vos ventes du mois. Le CSV est à transmettre à votre comptable.</p>`;
+  }catch(e){ if(document.body.contains(box)) box.innerHTML=`<p class="small">Factures indisponibles : ${esc(e.message)}</p>`; }
+}
+ACT.doc = btn => withLock(btn, async () => {
+  const native = isNative(); const w = native ? null : window.open('', '_blank');
+  try{
+    const r = await api('POST','/api/docs/link', btn.dataset.kind==='invoice' ? {kind:'invoice', id:btn.dataset.id} : {kind:'csv', month:btn.dataset.month});
+    if(native){
+      const blob = await (await fetch(r.url)).blob();
+      const isPdf = btn.dataset.kind==='invoice', name = isPdf ? (btn.dataset.number||'facture-latecheck')+'.pdf' : 'latecheck-releve-'+btn.dataset.month+'.csv';
+      if(isPdf && btn.dataset.print==='1' && await nativePrint(blob,'pdf',name)) return;
+      const file = new File([blob], name, {type: isPdf ? 'application/pdf' : 'text/csv'});
+      return shareOrOffer(file, isPdf ? 'Facture '+(btn.dataset.number||'') : 'Relevé '+btn.dataset.month, ()=>window.open(r.url,'_blank'));
+    }
+    if(w) w.location.href = r.url; else location.href = r.url;
+  }catch(e){ if(w) w.close(); throw e; }
 });
 ACT.refund = btn => { if(!confirm('Rembourser intégralement ce paiement au voyageur ? La commission LateCheck est annulée. Attention : Stripe ne restitue pas ses frais de paiement.')) return;
   withLock(btn, async () => { await api('POST',`/api/payments/${btn.dataset.id}/refund`); toast('Remboursement effectué.'); render(); }); };
@@ -757,6 +887,7 @@ route('/h/account', () => {
     <div id="pushcard" class="mt"></div>
     <h3 class="sec">Paramètres</h3>
     <div class="menu">
+      <a href="#/h/account/billing">${I.euro.replace(/22/g,'20')} Informations de facturation <span class="chev">${I.chev}</span></a>
       <a href="#/legal/cgu">${I.list} Conditions générales d'utilisation <span class="chev">${I.chev}</span></a>
       <a href="#/legal/cgv">${I.list} Conditions générales de vente <span class="chev">${I.chev}</span></a>
       <a href="#/legal/privacy">${I.lock.replace(/24/g,'20')} Politique de confidentialité <span class="chev">${I.chev}</span></a>
@@ -768,6 +899,20 @@ route('/h/account', () => {
     <h3 class="sec">Notifications reçues</h3>${emailList(db.emails.slice(0,6))}
   </main>`, {nav:hostNav('',db,u)});
   pushCard();
+});
+route('/h/account/billing', () => {
+  const g=guard('host'); if(!g) return; const {u}=g; const b=u.billing||{};
+  page(`${topBar({title:'Facturation', back:'#/h/account'})}<main class="main"><form id="f" novalidate>
+    <h2 class="title">Informations de facturation</h2><p class="sub">Elles apparaissent sur vos factures LateCheck. Laissez vide ce qui ne vous concerne pas.</p>
+    <label class="f" for="c">Société ou nom commercial</label><input class="input" id="c" maxlength="100" value="${esc(b.company||'')}" placeholder="Ex : Conciergerie du Centre SAS">
+    <label class="f" for="a">Adresse de facturation</label><textarea class="input" id="a" maxlength="200" placeholder="Ex : 15 rue des Lices, 49100 Angers">${esc(b.address||'')}</textarea>
+    <label class="f" for="s">SIREN</label><input class="input" id="s" inputmode="numeric" maxlength="11" value="${esc(b.siren||'')}" placeholder="9 chiffres">
+    <label class="f" for="v">N° de TVA intracommunautaire</label><input class="input" id="v" maxlength="20" value="${esc(b.vat||'')}" placeholder="Ex : FR12345678901">
+    <p class="hint">Les factures déjà émises ne sont pas modifiées : ces informations s'appliquent aux prochaines.</p>
+    <p class="err" id="err"></p><button class="btn mt" id="b">Enregistrer</button>
+  </form></main>`);
+  $('#f').onsubmit = ev => { ev.preventDefault(); submitForm($('#b'), $('#err'), async () => {
+    await api('PUT','/api/account/billing',{company:$('#c').value, address:$('#a').value, siren:$('#s').value, vat:$('#v').value}); toast('Informations enregistrées'); go('#/h/account'); }); };
 });
 route('/h/account/delete', () => {
   const g=guard('host'); if(!g) return; const {db,u}=g;
@@ -833,7 +978,7 @@ route('/s/:slug/recap', slug => {
     <div class="kv"><div><span>Heure de départ actuelle</span><b>${l.checkout}</b></div><div><span>Nouvelle heure de départ</span><b>${addHours(l.checkout,h)}</b></div><div><span>Durée supplémentaire</span><b>${hoursLabel(h)}</b></div><div class="total"><span>Prix</span><b style="color:var(--green)">${eur(l.prices[h])}</b></div></div>
     <label class="f" for="dt">Date de votre départ</label><input class="input" type="date" id="dt" min="${todayISO()}" value="${esc(d.date||todayISO())}">
     <label class="f" for="n">Prénom</label><input class="input" id="n" maxlength="40" autocomplete="given-name" value="${esc(d.name||'')}">
-    <label class="f" for="e">E-mail</label><input class="input" id="e" type="email" autocomplete="email" value="${esc(d.email||'')}"><p class="hint">Pour recevoir la réponse de votre hôte et le lien de paiement.</p>
+    <label class="f" for="e">E-mail</label><input class="input" id="e" type="email" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="next" autocomplete="email" value="${esc(d.email||'')}"><p class="hint">Pour recevoir la réponse de votre hôte et la confirmation de votre départ tardif.</p>
     <label class="f" for="m">Message pour votre hôte (facultatif)</label><textarea class="input" id="m" maxlength="300" placeholder="Merci beaucoup !">${esc(d.message||'')}</textarea>
     <div class="note mt">${I.lock.replace(/24/g,'20')}<div>Le montant est <b>réservé</b> sur votre carte, pas prélevé. Il n'est encaissé que si votre hôte accepte. S'il refuse, il est libéré automatiquement.</div></div>
     <label class="mt" style="display:flex;gap:10px;align-items:flex-start;font-size:14px;cursor:pointer"><input type="checkbox" id="cgv" style="width:20px;height:20px;accent-color:var(--green);flex:none;margin-top:1px"><span>J'accepte les <a href="#/legal/cgv">conditions générales de vente</a> et la <a href="#/legal/privacy">politique de confidentialité</a>.</span></label>
@@ -867,7 +1012,7 @@ route('/r/:id/:t', (id,t) => {
   else if(r.status==='paid') body=`<div class="ico pop">${I.check}</div><h2>Votre départ tardif est confirmé !</h2><p>Votre hôte a accepté : vous pouvez rester jusqu'à ${hFmt(r.newTime)}. Une confirmation vous a été envoyée par e-mail.</p><div class="kv" style="text-align:left"><div><span>Date</span><b>${fmtDay(r.date)}</b></div><div><span>Logement</span><b>${esc(l.name||'')}</b></div><div><span>Nouveau départ</span><b>${r.newTime}</b></div><div><span>Montant payé</span><b>${eur2(r.price)}</b></div></div><div class="mt">${back}</div>`;
   else if(r.status==='refused') body=`<div class="ico bad">${I.x}</div><h2>Demande refusée</h2><p>Votre hôte ne peut pas accepter cette demande. Le montant réservé est libéré, rien n'a été prélevé. Merci de libérer le logement à l'heure prévue (${r.oldTime}).</p>${back}`;
   else if(r.status==='refunded') body=`<div class="ico bad">${I.x}</div><h2>Paiement remboursé</h2><p>Votre paiement de ${eur2(r.price)} a été remboursé. Le départ tardif est annulé : départ à ${r.oldTime}.</p>${back}`;
-  else body=`<div class="ico bad">${I.clock}</div><h2>${r.status==='cancelled'?'Demande annulée':'Demande expirée'}</h2><p>${r.expiredReason==='payment'?'Le lien de paiement a expiré.':r.status==='cancelled'?"Ce logement n'accepte plus de demandes.":"Votre hôte n'a pas répondu à temps."} Le montant réservé est libéré, rien n'a été prélevé.</p>${back}`;
+  else body=`<div class="ico bad">${I.clock}</div><h2>${r.status==='cancelled'?'Demande annulée':'Demande expirée'}</h2><p>${r.expiredReason==='payment'?'La réservation du paiement a expiré.':r.status==='cancelled'?"Ce logement n'accepte plus de demandes.":"Votre hôte n'a pas répondu à temps."} Le montant réservé est libéré, rien n'a été prélevé.</p>${back}`;
   page(`${guestTop()}<main class="main"><div class="state">${body}</div></main>`);
   if(['pending','accepted','capturing','awaiting_payment'].includes(r.status) && (r.status!=='awaiting_payment' || justPaid)){
     const st=r.status; const qs='/api/state?rid='+encodeURIComponent(id)+'&rt='+encodeURIComponent(t);
@@ -1078,6 +1223,40 @@ async function pushCard(){
   else box.innerHTML = '';
 }
 ACT.pushon = btn => withLock(btn, async () => { const st = await initPush(true); toast(st==='granted' ? 'Notifications activées' : 'Notifications non autorisées'); pushCard(); });
+
+/* ============================ Animation d'ouverture (app iOS) ============================ */
+function playIntro(){
+  if(!isNative() || window.__introDone) return; window.__introDone = true;
+  const el = document.createElement('div'); el.id = 'intro'; el.setAttribute('aria-hidden','true');
+  el.innerHTML = `<div class="stage">
+    <svg viewBox="200 200 854 854" xmlns="http://www.w3.org/2000/svg">
+      <defs><linearGradient id="lcg" gradientUnits="userSpaceOnUse" x1="0" y1="220" x2="0" y2="1020"><stop offset="0" stop-color="#265B42"/><stop offset="1" stop-color="#1D4734"/></linearGradient></defs>
+      <g class="logo" style="transform-origin:627px 627px">
+        <g fill="none" stroke="url(#lcg)" stroke-width="82" stroke-linecap="round" stroke-linejoin="round">
+          <path class="arc" pathLength="1" d="M 690 972 A 360 360 0 1 1 966 503"/>
+          <g transform="translate(625 685)"><g class="hands">
+            <line x1="-153" y1="-82" x2="0" y2="0"/>
+            <g class="mn"><line x1="0" y1="-265" x2="0" y2="0"/></g>
+          </g></g>
+          <path class="chk" pathLength="1" d="M 668 792 L 745 876 L 985 637"/>
+        </g>
+      </g>
+    </svg>
+    <div class="word">LateCheck</div>
+    <div class="tag">Restez un peu plus longtemps.</div>
+  </div>`;
+  const today = new Date().toDateString(); let quick = false;
+  try{ quick = localStorage.getItem('lc_intro_day') === today; localStorage.setItem('lc_intro_day', today); }catch(e){}
+  if(quick) el.classList.add('quick');
+  document.body.appendChild(el);
+  // L'écran de démarrage a la même couleur de fond : on le masque sans fondu dès que l'animation est affichée
+  requestAnimationFrame(() => requestAnimationFrame(() => { try{ const S = window.Capacitor.Plugins && window.Capacitor.Plugins.SplashScreen; if(S) S.hide({fadeOutDuration:0}); }catch(e){} }));
+  let ended = false;
+  const exit = () => { if(ended) return; ended = true; el.classList.add('out'); setTimeout(() => el.remove(), 520); };
+  setTimeout(exit, matchMedia('(prefers-reduced-motion: reduce)').matches ? 350 : quick ? 260 : 1700);
+  el.addEventListener('pointerdown', exit);
+}
+playIntro();
 
 render();
 if(isNative()) setTimeout(()=>{ if(STATE.me && STATE.me.role==='host') initPush(false); }, 1500);
