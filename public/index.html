@@ -202,9 +202,7 @@ input.input::-webkit-date-and-time-value{text-align:left}
 .share-box{background:var(--bg);border-radius:22px;padding:20px;width:100%;max-width:456px;box-shadow:0 10px 40px rgba(0,0,0,.25)}
 #intro{position:fixed;inset:0;z-index:100;background:#F4F8F2;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
 #intro .stage{display:flex;flex-direction:column;align-items:center;will-change:transform,opacity}
-#intro svg{width:min(46vw,210px);height:auto;overflow:visible}
-#intro .word{margin-top:22px;font:700 34px/1 -apple-system,BlinkMacSystemFont,"Helvetica Neue",Helvetica,Arial,sans-serif;letter-spacing:-.02em;color:#22503B;opacity:0;animation:lcUp .45s cubic-bezier(.2,.8,.2,1) 1.05s both}
-#intro .tag{margin-top:10px;font:400 15px/1.3 -apple-system,BlinkMacSystemFont,"Helvetica Neue",Helvetica,Arial,sans-serif;color:#5C6B61;opacity:0;animation:lcUp .45s cubic-bezier(.2,.8,.2,1) 1.18s both}
+#intro svg{width:min(52vw,230px);height:auto;overflow:visible}
 #intro .arc{stroke-dasharray:1;stroke-dashoffset:1;animation:lcDraw .62s cubic-bezier(.55,0,.25,1) .08s forwards}
 #intro .chk{stroke-dasharray:1;stroke-dashoffset:1;animation:lcDraw .34s cubic-bezier(.4,0,.2,1) .98s forwards}
 #intro .hands{opacity:0;transform:scale(.5);animation:lcGrow .34s cubic-bezier(.34,1.4,.64,1) .42s forwards}
@@ -216,11 +214,8 @@ input.input::-webkit-date-and-time-value{text-align:left}
 @keyframes lcGrow{to{opacity:1;transform:scale(1)}}
 @keyframes lcSpin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
 @keyframes lcPop{0%{transform:scale(1)}45%{transform:scale(1.07)}100%{transform:scale(1)}}
-@keyframes lcUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
 @keyframes lcZoom{0%{transform:scale(1)}22%{transform:scale(.94)}100%{transform:scale(12);opacity:0}}
 @keyframes lcFade{to{opacity:0}}
-#intro.quick .arc,#intro.quick .chk{animation:none;stroke-dashoffset:0}
-#intro.quick .hands,#intro.quick .mn,#intro.quick .logo,#intro.quick .word,#intro.quick .tag{animation:none;opacity:1;transform:none}
 @media (prefers-reduced-motion:reduce){#intro *{animation:none!important;stroke-dashoffset:0!important;opacity:1!important;transform:none!important}#intro.out .stage{animation:none!important}#intro.out{animation:lcFade .3s forwards!important}}
 /* Comportement natif sur téléphone (skill mobile-native) */
 a,button,label,.btn,[role="button"]{touch-action:manipulation}
@@ -1242,18 +1237,13 @@ function playIntro(){
         </g>
       </g>
     </svg>
-    <div class="word">LateCheck</div>
-    <div class="tag">Restez un peu plus longtemps.</div>
   </div>`;
-  const today = new Date().toDateString(); let quick = false;
-  try{ quick = localStorage.getItem('lc_intro_day') === today; localStorage.setItem('lc_intro_day', today); }catch(e){}
-  if(quick) el.classList.add('quick');
   document.body.appendChild(el);
   // L'écran de démarrage a la même couleur de fond : on le masque sans fondu dès que l'animation est affichée
   requestAnimationFrame(() => requestAnimationFrame(() => { try{ const S = window.Capacitor.Plugins && window.Capacitor.Plugins.SplashScreen; if(S) S.hide({fadeOutDuration:0}); }catch(e){} }));
   let ended = false;
   const exit = () => { if(ended) return; ended = true; el.classList.add('out'); setTimeout(() => el.remove(), 520); };
-  setTimeout(exit, matchMedia('(prefers-reduced-motion: reduce)').matches ? 350 : quick ? 260 : 1700);
+  setTimeout(exit, matchMedia('(prefers-reduced-motion: reduce)').matches ? 350 : 1580);
   el.addEventListener('pointerdown', exit);
 }
 playIntro();
