@@ -155,11 +155,23 @@ function sendEmail(to, subject, body) {
 
 /* ------------------------------------------------------------------ Notifications push iOS (APNs) */
 const http2 = require('node:http2');
+// La clé .p8 est acceptée sous toutes ses formes : fichier collé tel quel (avec ou sans les lignes BEGIN/END),
+// ou converti en base64. On reconstruit toujours une clé PEM valide.
+function parseApnsKey(raw) {
+  raw = String(raw || '').trim();
+  if (!raw) return '';
+  if (raw.includes('PRIVATE KEY')) return raw.replace(/\\n/g, '\n');
+  const compact = raw.replace(/\s+/g, '');
+  try { const dec = Buffer.from(compact, 'base64').toString('utf8'); if (dec.includes('PRIVATE KEY')) return dec; } catch (_) {}
+  if (/^MIG[A-Za-z0-9+/=]+$/.test(compact)) return `-----BEGIN PRIVATE KEY-----\n${compact.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----\n`;
+  return '';
+}
 const APNS = {
-  keyId: env.APNS_KEY_ID, teamId: env.APNS_TEAM_ID, bundleId: env.APNS_BUNDLE_ID || 'fr.latecheck.app',
-  key: env.APNS_KEY_BASE64 ? Buffer.from(env.APNS_KEY_BASE64, 'base64').toString('utf8') : (env.APNS_KEY || '').replace(/\\n/g, '\n'),
+  keyId: String(env.APNS_KEY_ID || '').trim(), teamId: String(env.APNS_TEAM_ID || '').trim(), bundleId: String(env.APNS_BUNDLE_ID || 'fr.latecheck.app').trim(),
+  key: parseApnsKey(env.APNS_KEY_BASE64 || env.APNS_KEY), keyError: '',
 };
-APNS.enabled = !!(APNS.keyId && APNS.teamId && APNS.key.includes('PRIVATE KEY'));
+if (APNS.key) { try { crypto.createPrivateKey(APNS.key); } catch (e) { APNS.keyError = e.message; APNS.key = ''; } }
+APNS.enabled = !!(APNS.keyId && APNS.teamId && APNS.key);
 if (!APNS.enabled) console.warn('ℹ️  Notifications push désactivées (APNS_KEY_ID, APNS_TEAM_ID, APNS_KEY_BASE64).');
 let apnsJwt = null;
 function apnsToken() {
@@ -930,7 +942,7 @@ route('POST', '/api/push/test', async (req) => {
   const u = need(req, 'host');
   const tokens = q('SELECT * FROM push_tokens WHERE user_id=? ORDER BY created_at DESC').all(u.id);
   const out = { enabled: APNS.enabled, keyIdLen: (APNS.keyId || '').length, teamIdLen: (APNS.teamId || '').length,
-    keyFound: APNS.key.includes('PRIVATE KEY'), bundleId: APNS.bundleId, tokens: tokens.length, results: [] };
+    keyFound: !!APNS.key, keyError: APNS.keyError, keyId: APNS.keyId, bundleId: APNS.bundleId, tokens: tokens.length, results: [] };
   if (!APNS.enabled) return out;
   const payload = { aps: { alert: { title: 'Test LateCheck', body: 'Les notifications fonctionnent 🎉' }, sound: 'default' }, url: '#/h/account' };
   for (const t of tokens.slice(0, 3)) {
