@@ -172,10 +172,11 @@ function apnsToken() {
 }
 function apnsSend(host, deviceToken, payload) {
   return new Promise((resolve) => {
-    let client;
+    let client, jwt;
+    try { jwt = apnsToken(); } catch (e) { return resolve({ status: -1, reason: 'Clé APNs illisible : ' + e.message }); }
     try { client = http2.connect(host); } catch (e) { return resolve({ status: 0, reason: e.message }); }
     client.on('error', (e) => resolve({ status: 0, reason: e.message }));
-    const req = client.request({ ':method': 'POST', ':path': `/3/device/${deviceToken}`, authorization: `bearer ${apnsToken()}`,
+    const req = client.request({ ':method': 'POST', ':path': `/3/device/${deviceToken}`, authorization: `bearer ${jwt}`,
       'apns-topic': APNS.bundleId, 'apns-push-type': 'alert', 'apns-priority': '10', 'content-type': 'application/json' });
     let status = 0, body = '';
     req.on('response', (h) => { status = h[':status']; });
@@ -194,7 +195,8 @@ async function sendPush(userId, title, body, url) {
     let r = await apnsSend('https://api.push.apple.com', t.token, payload);
     if (r.status === 400 && /BadDeviceToken/.test(r.reason)) r = await apnsSend('https://api.sandbox.push.apple.com', t.token, payload);
     if (r.status === 410 || /Unregistered|BadDeviceToken/.test(r.reason)) q('DELETE FROM push_tokens WHERE token=?').run(t.token);
-    else if (r.status !== 200) console.error('APNs', r.status, r.reason);
+    else if (r.status !== 200) console.error('APNs échec', r.status, r.reason);
+    if (r.status === 200) console.log('APNs envoyé', t.token.slice(0, 8));
   }
 }
 
@@ -883,6 +885,23 @@ route('POST', '/api/push/register', (req) => {
   if (!/^[0-9a-fA-F]{32,200}$/.test(token)) fail(400, 'Jeton de notification invalide.');
   q("INSERT INTO push_tokens(token,user_id,platform,created_at) VALUES(?,?,'ios',?) ON CONFLICT(token) DO UPDATE SET user_id=excluded.user_id").run(token, u.id, now());
   return { enabled: APNS.enabled };
+});
+
+/* Notifications push : diagnostic complet depuis l'app (Mon compte → Tester les notifications) */
+route('POST', '/api/push/test', async (req) => {
+  const u = need(req, 'host');
+  const tokens = q('SELECT * FROM push_tokens WHERE user_id=? ORDER BY created_at DESC').all(u.id);
+  const out = { enabled: APNS.enabled, keyIdLen: (APNS.keyId || '').length, teamIdLen: (APNS.teamId || '').length,
+    keyFound: APNS.key.includes('PRIVATE KEY'), bundleId: APNS.bundleId, tokens: tokens.length, results: [] };
+  if (!APNS.enabled) return out;
+  const payload = { aps: { alert: { title: 'Test LateCheck', body: 'Les notifications fonctionnent 🎉' }, sound: 'default' }, url: '#/h/account' };
+  for (const t of tokens.slice(0, 3)) {
+    const prod = await apnsSend('https://api.push.apple.com', t.token, payload);
+    const sand = prod.status === 200 ? null : await apnsSend('https://api.sandbox.push.apple.com', t.token, payload);
+    console.log('APNs test', t.token.slice(0, 8), 'production', prod.status, prod.reason, sand ? `| sandbox ${sand.status} ${sand.reason}` : '');
+    out.results.push({ prod, sand });
+  }
+  return out;
 });
 
 /* Suppression du compte hôte (exigée par Apple, droit à l'effacement RGPD).
