@@ -999,6 +999,9 @@ route('/r/:id/:t', (id,t) => {
   const l=listingById(STATE,r.listingId)||{}; const back=l.slug&&!l.deleted?`<a class="btn ghost" href="#/s/${l.slug}">Retour au logement</a>`:'';
   const justPaid = qp('paid')==='1';
   let body='';
+  // Si le webhook Stripe tarde, on demande au serveur de vérifier le paiement directement (3 essais max)
+  if(justPaid && ['awaiting_payment','accepted'].includes(r.status) && !window.__syncing && (window.__syncN||0) < 3){ window.__syncing = true; window.__syncN = (window.__syncN||0) + 1;
+    setTimeout(async()=>{ try{ const x = await api('POST',`/api/public/requests/${r.id}/sync`,{t}); if(x.status !== r.status){ window.__syncing = false; return render(); } }catch(e){} window.__syncing = false; }, 3000 * window.__syncN); }
   if(r.status==='awaiting_payment' && justPaid) body=`<div class="ico"><span class="spin" style="width:36px;height:36px;border-width:3px"></span></div><h2>Confirmation en cours…</h2><p>Stripe nous transmet la réservation de votre paiement. Cela prend quelques secondes.</p>`;
   else if(r.status==='awaiting_payment') body=`<div class="ico">${I.lock}</div><h2>Paiement non finalisé</h2><p>Votre demande n'a pas encore été envoyée à votre hôte. Réservez ${eur(r.price)} pour la transmettre.</p><button class="btn" data-act="resume" data-id="${r.id}" data-t="${esc(t)}">${I.lock} Reprendre le paiement</button><div class="mt">${back}</div>`;
   else if(r.status==='abandoned') body=`<div class="ico bad">${I.x}</div><h2>Demande non envoyée</h2><p>Le paiement n'a pas été finalisé, rien n'a été prélevé. Vous pouvez refaire une demande.</p>${back}`;
@@ -1251,10 +1254,10 @@ ACT.pushtest = btn => withLock(btn, async () => {
   // 4. Envoi réel via Apple
   let r; try{ r = await api('POST','/api/push/test'); }catch(e){ steps.pop(); return stop('Le serveur ne connaît pas le test : ' + esc(e.message), 'Mettez en ligne le dernier <b>server.js</b> sur GitHub, puis attendez « Live » sur Render.'); }
   steps.pop();
-  if(!r.enabled){ const miss = [!r.keyFound&&'APNS_KEY_BASE64 (clé .p8 absente ou mal copiée)', r.keyIdLen!==10&&`APNS_KEY_ID (${r.keyIdLen} caractères au lieu de 10)`, r.teamIdLen!==10&&`APNS_TEAM_ID (${r.teamIdLen} caractères au lieu de 10)`].filter(Boolean);
+  if(!r.enabled){ const miss = [!r.keyFound&&(r.keyError?'APNS_KEY_BASE64 (clé illisible : '+esc(r.keyError)+')':'APNS_KEY_BASE64 : collez le contenu du fichier .p8 (pas son identifiant)'), r.keyIdLen!==10&&`APNS_KEY_ID (${r.keyIdLen} caractères au lieu de 10)`, r.teamIdLen!==10&&`APNS_TEAM_ID (${r.teamIdLen} caractères au lieu de 10)`].filter(Boolean);
     return stop('Notifications désactivées sur le serveur.', 'Sur Render → Environment, corrigez : ' + (miss.join(', ') || 'les variables APNS') + '. Puis Save, rebuild and deploy.'); }
   const all = r.results.flatMap(x => [x.prod, x.sand].filter(Boolean));
-  if(all.some(x => x.status === 200)) { steps.push([true, 'Notification acceptée par Apple']); return draw('Elle doit s’afficher dans les 5 secondes, même app ouverte. Si celle-ci arrive mais pas les vraies demandes : le paiement de test n’a pas atteint le serveur (webhook Stripe).'); }
+  if(all.some(x => x.status === 200)) { steps.push([true, `Notification acceptée par Apple (clé ${esc(r.keyId||'')})`]); return draw('Elle doit s’afficher dans les 5 secondes, même app ouverte. Si celle-ci arrive mais pas les vraies demandes : le paiement de test n’a pas atteint le serveur (webhook Stripe).'); }
   const reasons = all.map(x => x.reason).join(' ');
   const fix = /InvalidProviderToken/.test(reasons) ? 'Apple refuse la clé : sur Render, <b>APNS_KEY_ID</b> doit être l’ID de la clé .p8 et <b>APNS_TEAM_ID</b> l’ID d’équipe (developer.apple.com → Membership). La clé doit avoir le service « Apple Push Notifications ».'
     : /DeviceTokenNotForTopic|TopicDisallowed/.test(reasons) ? `Sur Render, <b>APNS_BUNDLE_ID</b> doit valoir <b>fr.latecheck.app</b> (actuellement : ${esc(r.bundleId)}).`
