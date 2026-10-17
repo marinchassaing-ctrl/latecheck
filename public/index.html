@@ -880,6 +880,7 @@ route('/h/account', () => {
     <h2 class="title">${esc(u.name)}</h2><p class="sub">${esc(u.email)}</p>
     <h3 class="sec">Paiements</h3><div class="card">${stripeCard}</div>
     <div id="pushcard" class="mt"></div>
+    ${isNative()?`<button class="btn soft sm" data-act="pushtest">${I.info} Tester les notifications</button><div id="pushdiag" class="mt"></div>`:''}
     <h3 class="sec">Paramètres</h3>
     <div class="menu">
       <a href="#/h/account/billing">${I.euro.replace(/22/g,'20')} Informations de facturation <span class="chev">${I.chev}</span></a>
@@ -1218,6 +1219,51 @@ async function pushCard(){
   else box.innerHTML = '';
 }
 ACT.pushon = btn => withLock(btn, async () => { const st = await initPush(true); toast(st==='granted' ? 'Notifications activées' : 'Notifications non autorisées'); pushCard(); });
+
+/* Diagnostic des notifications : teste chaque maillon et dit lequel bloque */
+ACT.pushtest = btn => withLock(btn, async () => {
+  const box = $('#pushdiag'); if(!box) return;
+  const P = PushPlugin(); const steps = [];
+  const draw = (fin) => { box.innerHTML = `<div class="card" style="padding:14px 16px">${steps.map(([ok,t])=>`<div style="display:flex;gap:10px;margin:6px 0;line-height:1.4"><span>${ok===null?'⏳':ok?'✅':'❌'}</span><span>${t}</span></div>`).join('')}${fin?`<div class="hint" style="margin-top:10px">${fin}</div>`:''}</div>`; };
+  const stop = (t, fin) => { steps.push([false, t]); draw(fin); };
+  if(!P) return stop("Le module de notifications n'est pas installé dans l'app.", 'Dans le Terminal : <b>npx cap sync ios</b>, puis relancez avec ▶ dans Xcode.');
+  // 1. Autorisation iOS
+  let st = (await P.checkPermissions()).receive;
+  if(st !== 'granted') st = (await P.requestPermissions()).receive;
+  if(st !== 'granted') return stop('iOS bloque les notifications pour LateCheck.', 'Réglages de l’iPhone → LateCheck → Notifications → Autoriser les notifications.');
+  steps.push([true,'Autorisation iOS accordée']); steps.push([null,'Demande du jeton à Apple…']); draw();
+  // 2. Jeton fourni par iOS (passe par les 2 fonctions d'AppDelegate)
+  const hs = [];
+  const reg = await new Promise(async res => {
+    const t = setTimeout(() => res({ err: 'timeout' }), 12000);
+    hs.push(await P.addListener('registration', x => { clearTimeout(t); res({ token: x.value }); }));
+    hs.push(await P.addListener('registrationError', e => { clearTimeout(t); res({ err: (e && (e.error || e.message)) || JSON.stringify(e) }); }));
+    try{ await P.register(); }catch(e){ clearTimeout(t); res({ err: e.message || String(e) }); }
+  });
+  hs.forEach(h => { try{ h.remove(); }catch(e){} }); steps.pop();
+  if(reg.err === 'timeout') return stop("iOS n'a pas transmis le jeton à l'app.", 'Vérifiez dans Xcode que <b>AppDelegate</b> contient les 2 fonctions (une seule fois chacune), puis relancez avec ▶.');
+  if(reg.err) return stop('Apple a refusé l’enregistrement : ' + esc(reg.err), /aps-environment|entitlement/i.test(reg.err) ? 'Dans Xcode → App → Signing & Capabilities : ajoutez <b>Push Notifications</b>, puis relancez avec ▶.' : 'Vérifiez la connexion Internet de l’iPhone, puis réessayez.');
+  steps.push([true, 'Jeton reçu d’Apple']);
+  // 3. Enregistrement sur le serveur
+  try{ await api('POST','/api/push/register',{token:reg.token}); steps.push([true,'iPhone enregistré sur le serveur']); }
+  catch(e){ return stop('Le serveur n’a pas enregistré l’iPhone : ' + esc(e.message), 'Vérifiez que le dernier <b>server.js</b> est en ligne sur Render.'); }
+  steps.push([null,'Envoi d’une notification de test…']); draw();
+  // 4. Envoi réel via Apple
+  let r; try{ r = await api('POST','/api/push/test'); }catch(e){ steps.pop(); return stop('Le serveur ne connaît pas le test : ' + esc(e.message), 'Mettez en ligne le dernier <b>server.js</b> sur GitHub, puis attendez « Live » sur Render.'); }
+  steps.pop();
+  if(!r.enabled){ const miss = [!r.keyFound&&'APNS_KEY_BASE64 (clé .p8 absente ou mal copiée)', r.keyIdLen!==10&&`APNS_KEY_ID (${r.keyIdLen} caractères au lieu de 10)`, r.teamIdLen!==10&&`APNS_TEAM_ID (${r.teamIdLen} caractères au lieu de 10)`].filter(Boolean);
+    return stop('Notifications désactivées sur le serveur.', 'Sur Render → Environment, corrigez : ' + (miss.join(', ') || 'les variables APNS') + '. Puis Save, rebuild and deploy.'); }
+  const all = r.results.flatMap(x => [x.prod, x.sand].filter(Boolean));
+  if(all.some(x => x.status === 200)) { steps.push([true, 'Notification acceptée par Apple']); return draw('Elle doit s’afficher dans les 5 secondes, même app ouverte. Si celle-ci arrive mais pas les vraies demandes : le paiement de test n’a pas atteint le serveur (webhook Stripe).'); }
+  const reasons = all.map(x => x.reason).join(' ');
+  const fix = /InvalidProviderToken/.test(reasons) ? 'Apple refuse la clé : sur Render, <b>APNS_KEY_ID</b> doit être l’ID de la clé .p8 et <b>APNS_TEAM_ID</b> l’ID d’équipe (developer.apple.com → Membership). La clé doit avoir le service « Apple Push Notifications ».'
+    : /DeviceTokenNotForTopic|TopicDisallowed/.test(reasons) ? `Sur Render, <b>APNS_BUNDLE_ID</b> doit valoir <b>fr.latecheck.app</b> (actuellement : ${esc(r.bundleId)}).`
+    : /illisible/.test(reasons) ? 'La clé .p8 est mal copiée dans <b>APNS_KEY_BASE64</b> : recopiez-la entièrement.'
+    : /ExpiredProviderToken|TooManyProviderTokenUpdates/.test(reasons) ? 'Apple limite temporairement : réessayez dans 30 minutes.'
+    : all.some(x => x.status === 0) ? 'Le serveur n’arrive pas à joindre Apple. Réessayez dans quelques minutes.'
+    : 'Envoyez-moi une photo de cet écran.';
+  stop('Apple a refusé l’envoi : ' + esc(all.map(x => `${x.status} ${x.reason}`).join(' / ')), fix);
+});
 
 /* ============================ Animation d'ouverture (app iOS) ============================ */
 function playIntro(){
