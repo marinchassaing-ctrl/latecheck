@@ -187,16 +187,32 @@ function apnsSend(host, deviceToken, payload) {
     req.end(JSON.stringify(payload));
   });
 }
+// Une même app peut parler aux deux serveurs d'Apple : production (TestFlight, App Store) et sandbox (builds Xcode).
+// Selon la clé .p8 (réglée « Sandbox », « Production » ou les deux), un serveur peut refuser : on essaie l'autre,
+// et on retient celui qui a marché pour chaque iPhone.
+const APNS_HOSTS = { production: 'https://api.push.apple.com', sandbox: 'https://api.sandbox.push.apple.com' };
+const tokenEnv = new Map();
+const isTokenError = (r) => r.status === 410 || /^(Unregistered|BadDeviceToken)$/.test(r.reason);
+async function apnsDeliver(token, payload) {
+  const first = tokenEnv.get(token) || 'production', order = [first, first === 'production' ? 'sandbox' : 'production'];
+  const tries = {};
+  for (const env of order) {
+    const r = await apnsSend(APNS_HOSTS[env], token, payload); tries[env] = r;
+    if (r.status === 200) { tokenEnv.set(token, env); return { ok: true, env, tries }; }
+  }
+  return { ok: false, tries };
+}
 async function sendPush(userId, title, body, url) {
   if (!APNS.enabled) return;
   const payload = { aps: { alert: { title, body }, sound: 'default' }, url: url || '#/h' };
-  for (const t of q('SELECT * FROM push_tokens WHERE user_id=?').all(userId)) {
-    // Builds Xcode = environnement de développement, TestFlight/App Store = production : on essaie les deux.
-    let r = await apnsSend('https://api.push.apple.com', t.token, payload);
-    if (r.status === 400 && /BadDeviceToken/.test(r.reason)) r = await apnsSend('https://api.sandbox.push.apple.com', t.token, payload);
-    if (r.status === 410 || /Unregistered|BadDeviceToken/.test(r.reason)) q('DELETE FROM push_tokens WHERE token=?').run(t.token);
-    else if (r.status !== 200) console.error('APNs échec', r.status, r.reason);
-    if (r.status === 200) console.log('APNs envoyé', t.token.slice(0, 8));
+  const tokens = q('SELECT * FROM push_tokens WHERE user_id=?').all(userId);
+  if (!tokens.length) console.warn('APNs : aucun iPhone enregistré pour cet hôte (ouvrez l’app et activez les notifications)');
+  for (const t of tokens) {
+    const d = await apnsDeliver(t.token, payload);
+    if (d.ok) { console.log('APNs envoyé', t.token.slice(0, 8), d.env); continue; }
+    const all = Object.values(d.tries);
+    if (all.every(isTokenError)) { q('DELETE FROM push_tokens WHERE token=?').run(t.token); console.warn('APNs : iPhone désinscrit, jeton supprimé', t.token.slice(0, 8)); }
+    else console.error('APNs échec', t.token.slice(0, 8), Object.entries(d.tries).map(([e, r]) => `${e} ${r.status} ${r.reason}`).join(' | '));
   }
 }
 
@@ -619,6 +635,28 @@ async function onCheckoutAuthorized(s) {
   sendEmail(r.guest_email, 'Votre demande a bien été envoyée', `Bonjour ${r.guest_name},\n\nVotre demande de départ à ${r.new_time} a été transmise à votre hôte.\n${eur(r.price)} sont réservés sur votre carte : ils ne seront prélevés que si votre hôte accepte.\nSuivre la demande : ${APP_URL}/#/r/${r.id}/${r.guest_token}`);
 }
 
+/* ------------------------------------------------------------------ Rattrapage sans webhook
+   Si le webhook Stripe n'arrive pas (URL ou secret erronés, panne), on interroge Stripe nous-mêmes :
+   au retour du voyageur sur la page de confirmation, puis chaque minute pour les paiements récents. */
+async function reconcileCheckout(r) {
+  if (!r || !r.checkout_session || !['awaiting_payment', 'abandoned', 'accepted'].includes(r.status)) return false;
+  const s = await stripe('GET', `/checkout/sessions/${r.checkout_session}`);
+  if (s.status !== 'complete') return false;
+  const fresh = q('SELECT status FROM requests WHERE id=?').get(r.id);
+  if (!fresh || fresh.status !== r.status) return false; // déjà traité entre-temps (webhook arrivé)
+  console.warn(`Rattrapage : paiement ${r.id} confirmé directement auprès de Stripe (le webhook n'est pas arrivé)`);
+  if (s.payment_status === 'paid') await onCheckoutCompleted(s); else await onCheckoutAuthorized(s);
+  return true;
+}
+let reconciling = false;
+setInterval(async () => {
+  if (reconciling) return; reconciling = true;
+  try {
+    const recent = q("SELECT * FROM requests WHERE checkout_session IS NOT NULL AND status IN ('awaiting_payment','abandoned') AND expires_at > ? ORDER BY expires_at DESC LIMIT 25").all(now() - 2 * 3600000);
+    for (const r of recent) { try { await reconcileCheckout(r); } catch (e) { console.error('rattrapage', r.id, e.message); } }
+  } finally { reconciling = false; }
+}, 60000).unref();
+
 /* ------------------------------------------------------------------ Paiements confirmés par webhook */
 function markRefunded(paymentId) {
   const p = q('SELECT * FROM payments WHERE id=?').get(paymentId);
@@ -1034,6 +1072,13 @@ route('POST', '/api/public/requests', async (req) => {
   try { return { id: r.id, guestToken: r.guest_token, url: await openCheckout(r) }; }
   catch (e) { q("UPDATE requests SET status='abandoned' WHERE id=? AND status='awaiting_payment'").run(r.id); throw e; }
 });
+route('POST', '/api/public/requests/:id/sync', async (req, _res, id) => {
+  const r = q('SELECT * FROM requests WHERE id=? AND guest_token=?').get(id, String(req.body.t || ''));
+  if (!r) fail(404, 'Demande introuvable.');
+  await reconcileCheckout(r);
+  return { status: q('SELECT status FROM requests WHERE id=?').get(id).status };
+}, { rate: 'public' });
+
 route('POST', '/api/public/requests/:id/checkout', async (req, _res, id) => {
   sweep();
   const r = q('SELECT * FROM requests WHERE id=? AND guest_token=?').get(id, String(req.body.t || ''));
@@ -1119,8 +1164,9 @@ route('GET', '/api/admin/export.csv', (req, res) => {
 
 /* Webhooks Stripe */
 route('POST', '/api/stripe/webhook', async (req, res) => {
-  if (!verifyStripeSignature(req.raw, req.headers['stripe-signature'])) { res.writeHead(400); res.end('Signature invalide'); return; }
+  if (!verifyStripeSignature(req.raw, req.headers['stripe-signature'])) { console.warn('Webhook Stripe REFUSÉ : signature invalide → vérifiez STRIPE_WEBHOOK_SECRET sur Render (whsec_… de cet endpoint)'); res.writeHead(400); res.end('Signature invalide'); return; }
   const ev = JSON.parse(req.raw.toString('utf8'));
+  console.log('Webhook Stripe reçu :', ev.type);
   if (q('SELECT 1 FROM stripe_events WHERE id=?').get(ev.id)) return { received: true, duplicate: true };
   await handleStripeEvent(ev); // en cas d'erreur : 500, Stripe renverra l'événement
   q('INSERT OR IGNORE INTO stripe_events(id,type,received_at) VALUES(?,?,?)').run(ev.id, ev.type, now());
