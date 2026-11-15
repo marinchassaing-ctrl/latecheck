@@ -11,6 +11,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
+const zlib = require('node:zlib');
 
 /* ------------------------------------------------------------------ Config */
 (function loadEnv() {
@@ -85,6 +86,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS inv_one_month ON invoices(host_id, month) WHER
 CREATE UNIQUE INDEX IF NOT EXISTS inv_one_credit ON invoices(payment_id) WHERE type='avoir';`);
 db.exec(`CREATE TABLE IF NOT EXISTS push_tokens(token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, platform TEXT NOT NULL, created_at INTEGER NOT NULL)`);
 
+db.exec(`CREATE TABLE IF NOT EXISTS web_push_subs(endpoint TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS password_resets(token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS secrets(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+try { db.exec('ALTER TABLE listings ADD COLUMN photo_v INTEGER'); } catch (e) { /* colonne déjà présente */ }
+try { db.exec('ALTER TABLE requests ADD COLUMN lang TEXT'); } catch (e) { /* colonne déjà présente */ }
+
 /* Passage du mode test au mode réel : les comptes Stripe de test n'existent pas en réel.
    On réinitialise les connexions Stripe et on efface les demandes et paiements fictifs.
    Les comptes hôtes et les logements (donc les QR codes déjà imprimés) sont conservés. */
@@ -110,9 +117,41 @@ const hoursLabel = (h) => '+' + h + (h > 1 ? ' heures' : ' heure');
 const hFmt = (t) => { const [a, b] = t.split(':'); return Number(a) + ' h' + (b === '00' ? '' : ' ' + b); };
 const addHours = (hhmm, h) => { const [a, b] = hhmm.split(':').map(Number); const m = (a * 60 + b + h * 60) % 1440; return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); };
 const dayFr = (d) => new Date(d + 'T12:00:00').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+/* ------------------------------------------------------------------ Langues du parcours voyageur
+   Le voyageur choisit sa langue sur la page du QR code : ses e-mails et la page de paiement Stripe suivent. */
+const LANGS = ['fr', 'en', 'it', 'es', 'de', 'pt'];
+const LOCALE = { fr: 'fr-FR', en: 'en-GB', it: 'it-IT', es: 'es-ES', de: 'de-DE', pt: 'pt-PT' };
+const GI = {"hello": {"fr": "Bonjour", "en": "Hello", "it": "Ciao", "es": "Hola", "de": "Hallo", "pt": "Olá"}, "hours": {"fr": ["heure", "heures"], "en": ["hour", "hours"], "it": ["ora", "ore"], "es": ["hora", "horas"], "de": ["Stunde", "Stunden"], "pt": ["hora", "horas"]}, "product": {"fr": ["Départ tardif", "Départ à {time} au lieu de {old}, le {date}.", "Montant réservé, prélevé seulement si l'hôte accepte."], "en": ["Late check-out", "Check-out at {time} instead of {old}, on {date}.", "Amount held, charged only if the host accepts."], "it": ["Check-out posticipato", "Check-out alle {time} invece delle {old}, {date}.", "Importo bloccato, addebitato solo se l'host accetta."], "es": ["Salida tardía", "Salida a las {time} en lugar de las {old}, el {date}.", "Importe retenido, cobrado solo si el anfitrión acepta."], "de": ["Später Check-out", "Check-out um {time} Uhr statt {old} Uhr, am {date}.", "Betrag reserviert, wird nur abgebucht, wenn der Gastgeber zustimmt."], "pt": ["Saída tardia", "Saída às {time} em vez das {old}, {date}.", "Montante reservado, cobrado apenas se o anfitrião aceitar."]}, "mail": {"sent": {"fr": ["Votre demande a bien été envoyée", "Votre demande de départ à {time} a été transmise à votre hôte.\n{amount} sont réservés sur votre carte : ils ne seront prélevés que si votre hôte accepte.\nSuivre la demande : {link}"], "en": ["Your request has been sent", "Your request to check out at {time} has been sent to your host.\n{amount} is held on your card: it will only be charged if your host accepts.\nTrack your request: {link}"], "it": ["La tua richiesta è stata inviata", "La tua richiesta di check-out alle {time} è stata inviata al tuo host.\n{amount} sono bloccati sulla tua carta: saranno addebitati solo se l'host accetta.\nSegui la richiesta: {link}"], "es": ["Tu solicitud se ha enviado", "Tu solicitud de salida a las {time} se ha enviado a tu anfitrión.\n{amount} quedan retenidos en tu tarjeta: solo se cobrarán si tu anfitrión acepta.\nSeguir la solicitud: {link}"], "de": ["Ihre Anfrage wurde gesendet", "Ihre Anfrage für einen Check-out um {time} Uhr wurde an Ihren Gastgeber gesendet.\n{amount} sind auf Ihrer Karte reserviert: Der Betrag wird nur abgebucht, wenn Ihr Gastgeber zustimmt.\nAnfrage verfolgen: {link}"], "pt": ["O seu pedido foi enviado", "O seu pedido de saída às {time} foi enviado ao seu anfitrião.\n{amount} ficam reservados no seu cartão: só serão cobrados se o anfitrião aceitar.\nAcompanhar o pedido: {link}"]}, "confirmed": {"fr": ["Votre départ tardif est confirmé", "Votre hôte a accepté : vous pouvez rester jusqu'à {time} le {date} à « {name} ».\n{amount} ont été prélevés sur votre carte."], "en": ["Your late check-out is confirmed", "Your host has accepted: you can stay until {time} on {date} at \"{name}\".\n{amount} has been charged to your card."], "it": ["Il tuo check-out posticipato è confermato", "Il tuo host ha accettato: puoi restare fino alle {time} di {date} presso «{name}».\n{amount} sono stati addebitati sulla tua carta."], "es": ["Tu salida tardía está confirmada", "Tu anfitrión ha aceptado: puedes quedarte hasta las {time} del {date} en «{name}».\nSe han cobrado {amount} en tu tarjeta."], "de": ["Ihr später Check-out ist bestätigt", "Ihr Gastgeber hat zugestimmt: Sie können am {date} bis {time} Uhr in „{name}“ bleiben.\n{amount} wurden von Ihrer Karte abgebucht."], "pt": ["A sua saída tardia está confirmada", "O seu anfitrião aceitou: pode ficar até às {time} de {date} em «{name}».\n{amount} foram cobrados no seu cartão."]}, "refused": {"fr": ["Votre demande de départ tardif", "Votre hôte ne peut pas accepter votre demande pour « {name} ». Le montant réservé sur votre carte est libéré : rien n'a été prélevé. Merci de libérer le logement à {old}."], "en": ["Your late check-out request", "Your host cannot accept your request for \"{name}\". The amount held on your card has been released: nothing was charged. Please check out at {old}."], "it": ["La tua richiesta di check-out posticipato", "Il tuo host non può accettare la tua richiesta per «{name}». L'importo bloccato sulla tua carta è stato sbloccato: non è stato addebitato nulla. Ti preghiamo di lasciare l'alloggio alle {old}."], "es": ["Tu solicitud de salida tardía", "Tu anfitrión no puede aceptar tu solicitud para «{name}». El importe retenido en tu tarjeta se ha liberado: no se ha cobrado nada. Por favor, deja el alojamiento a las {old}."], "de": ["Ihre Anfrage für einen späten Check-out", "Ihr Gastgeber kann Ihre Anfrage für „{name}“ leider nicht annehmen. Der auf Ihrer Karte reservierte Betrag wurde freigegeben: Es wurde nichts abgebucht. Bitte verlassen Sie die Unterkunft um {old} Uhr."], "pt": ["O seu pedido de saída tardia", "O seu anfitrião não pode aceitar o seu pedido para «{name}». O montante reservado no seu cartão foi libertado: nada foi cobrado. Por favor, deixe o alojamento às {old}."]}, "expired": {"fr": ["Votre demande de départ tardif a expiré", "Votre hôte n'a pas répondu à temps. Le montant réservé sur votre carte est libéré : rien n'a été prélevé. Merci de libérer le logement à {old}."], "en": ["Your late check-out request has expired", "Your host did not reply in time. The amount held on your card has been released: nothing was charged. Please check out at {old}."], "it": ["La tua richiesta di check-out posticipato è scaduta", "Il tuo host non ha risposto in tempo. L'importo bloccato sulla tua carta è stato sbloccato: non è stato addebitato nulla. Ti preghiamo di lasciare l'alloggio alle {old}."], "es": ["Tu solicitud de salida tardía ha caducado", "Tu anfitrión no ha respondido a tiempo. El importe retenido en tu tarjeta se ha liberado: no se ha cobrado nada. Por favor, deja el alojamiento a las {old}."], "de": ["Ihre Anfrage für einen späten Check-out ist abgelaufen", "Ihr Gastgeber hat nicht rechtzeitig geantwortet. Der auf Ihrer Karte reservierte Betrag wurde freigegeben: Es wurde nichts abgebucht. Bitte verlassen Sie die Unterkunft um {old} Uhr."], "pt": ["O seu pedido de saída tardia expirou", "O seu anfitrião não respondeu a tempo. O montante reservado no seu cartão foi libertado: nada foi cobrado. Por favor, deixe o alojamento às {old}."]}, "released": {"fr": ["Votre demande de départ tardif a expiré", "Le montant réservé sur votre carte est libéré : rien n'a été prélevé."], "en": ["Your late check-out request has expired", "The amount held on your card has been released: nothing was charged."], "it": ["La tua richiesta di check-out posticipato è scaduta", "L'importo bloccato sulla tua carta è stato sbloccato: non è stato addebitato nulla."], "es": ["Tu solicitud de salida tardía ha caducado", "El importe retenido en tu tarjeta se ha liberado: no se ha cobrado nada."], "de": ["Ihre Anfrage für einen späten Check-out ist abgelaufen", "Der auf Ihrer Karte reservierte Betrag wurde freigegeben: Es wurde nichts abgebucht."], "pt": ["O seu pedido de saída tardia expirou", "O montante reservado no seu cartão foi libertado: nada foi cobrado."]}, "paylink": {"fr": ["Votre lien de paiement a expiré", "Le lien de paiement a expiré : votre départ tardif n'est pas confirmé. Merci de libérer le logement à {old}."], "en": ["Your payment link has expired", "The payment link has expired: your late check-out is not confirmed. Please check out at {old}."], "it": ["Il link di pagamento è scaduto", "Il link di pagamento è scaduto: il tuo check-out posticipato non è confermato. Ti preghiamo di lasciare l'alloggio alle {old}."], "es": ["Tu enlace de pago ha caducado", "El enlace de pago ha caducado: tu salida tardía no está confirmada. Por favor, deja el alojamiento a las {old}."], "de": ["Ihr Zahlungslink ist abgelaufen", "Der Zahlungslink ist abgelaufen: Ihr später Check-out ist nicht bestätigt. Bitte verlassen Sie die Unterkunft um {old} Uhr."], "pt": ["O seu link de pagamento expirou", "O link de pagamento expirou: a sua saída tardia não está confirmada. Por favor, deixe o alojamento às {old}."]}, "taken": {"fr": ["Votre demande de départ tardif", "Un départ tardif a déjà été confirmé pour cette date. Le montant réservé sur votre carte est libéré : rien n'a été prélevé. Merci de libérer le logement à {old}."], "en": ["Your late check-out request", "A late check-out has already been confirmed for this date. The amount held on your card has been released: nothing was charged. Please check out at {old}."], "it": ["La tua richiesta di check-out posticipato", "Un check-out posticipato è già stato confermato per questa data. L'importo bloccato sulla tua carta è stato sbloccato: non è stato addebitato nulla. Ti preghiamo di lasciare l'alloggio alle {old}."], "es": ["Tu solicitud de salida tardía", "Ya se ha confirmado una salida tardía para esta fecha. El importe retenido en tu tarjeta se ha liberado: no se ha cobrado nada. Por favor, deja el alojamiento a las {old}."], "de": ["Ihre Anfrage für einen späten Check-out", "Für dieses Datum wurde bereits ein später Check-out bestätigt. Der auf Ihrer Karte reservierte Betrag wurde freigegeben: Es wurde nichts abgebucht. Bitte verlassen Sie die Unterkunft um {old} Uhr."], "pt": ["O seu pedido de saída tardia", "Já foi confirmada uma saída tardia para esta data. O montante reservado no seu cartão foi libertado: nada foi cobrado. Por favor, deixe o alojamento às {old}."]}, "refunded": {"fr": ["Remboursement de votre départ tardif", "{amount} vous ont été remboursés. Le départ tardif est annulé : merci de libérer le logement à {old}."], "en": ["Refund of your late check-out", "{amount} has been refunded to you. The late check-out is cancelled: please check out at {old}."], "it": ["Rimborso del tuo check-out posticipato", "Ti sono stati rimborsati {amount}. Il check-out posticipato è annullato: ti preghiamo di lasciare l'alloggio alle {old}."], "es": ["Reembolso de tu salida tardía", "Se te han reembolsado {amount}. La salida tardía queda cancelada: por favor, deja el alojamiento a las {old}."], "de": ["Erstattung Ihres späten Check-outs", "{amount} wurden Ihnen erstattet. Der späte Check-out ist storniert: Bitte verlassen Sie die Unterkunft um {old} Uhr."], "pt": ["Reembolso da sua saída tardia", "Foram-lhe reembolsados {amount}. A saída tardia foi cancelada: por favor, deixe o alojamento às {old}."]}, "cancelled": {"fr": ["Demande annulée", "Ce logement n'accepte plus de demandes de départ tardif. Le montant réservé est libéré : rien n'a été prélevé."], "en": ["Request cancelled", "This property no longer accepts late check-out requests. Any amount held has been released: nothing was charged."], "it": ["Richiesta annullata", "Questo alloggio non accetta più richieste di check-out posticipato. L'importo bloccato è stato sbloccato: non è stato addebitato nulla."], "es": ["Solicitud cancelada", "Este alojamiento ya no acepta solicitudes de salida tardía. El importe retenido se ha liberado: no se ha cobrado nada."], "de": ["Anfrage storniert", "Diese Unterkunft nimmt keine Anfragen für einen späten Check-out mehr an. Der reservierte Betrag wurde freigegeben: Es wurde nichts abgebucht."], "pt": ["Pedido cancelado", "Este alojamento já não aceita pedidos de saída tardia. O montante reservado foi libertado: nada foi cobrado."]}, "capture": {"fr": ["Votre demande de départ tardif", "Le paiement réservé n'a pas pu être encaissé : votre départ tardif n'est pas confirmé. Merci de libérer le logement à {old}."], "en": ["Your late check-out request", "The held payment could not be charged: your late check-out is not confirmed. Please check out at {old}."], "it": ["La tua richiesta di check-out posticipato", "Non è stato possibile addebitare il pagamento bloccato: il tuo check-out posticipato non è confermato. Ti preghiamo di lasciare l'alloggio alle {old}."], "es": ["Tu solicitud de salida tardía", "No se ha podido cobrar el pago retenido: tu salida tardía no está confirmada. Por favor, deja el alojamiento a las {old}."], "de": ["Ihre Anfrage für einen späten Check-out", "Die reservierte Zahlung konnte nicht abgebucht werden: Ihr später Check-out ist nicht bestätigt. Bitte verlassen Sie die Unterkunft um {old} Uhr."], "pt": ["O seu pedido de saída tardia", "Não foi possível cobrar o pagamento reservado: a sua saída tardia não está confirmada. Por favor, deixe o alojamento às {old}."]}}};
+const langOf = (r) => (r && LANGS.includes(r.lang) ? r.lang : 'fr');
+const fillText = (t, v) => t.replace(/\{(\w+)\}/g, (m, k) => (v[k] == null ? '' : v[k]));
+const dayLoc = (d, L) => new Date(d + 'T12:00:00').toLocaleDateString(LOCALE[L], { weekday: 'long', day: 'numeric', month: 'long' });
+const eurLoc = (c, L) => (c / 100).toLocaleString(LOCALE[L], { style: 'currency', currency: 'EUR' });
+function gMail(r, key, v = {}) {
+  const L = langOf(r), [subject, body] = GI.mail[key][L], vars = { ...v };
+  if (vars.amount != null) vars.amount = eurLoc(vars.amount, L);
+  if (vars.date) vars.date = dayLoc(vars.date, L);
+  sendEmail(r.guest_email, subject, `${GI.hello[L]} ${r.guest_name},\n\n${fillText(body, vars)}`);
+}
+function gProduct(r, l, held) {
+  const L = langOf(r), p = GI.product[L];
+  return { name: `${p[0]} + ${r.hours} ${GI.hours[L][r.hours > 1 ? 1 : 0]} — ${l.name}`,
+    description: fillText(p[1], { time: r.new_time, old: r.old_time, date: dayLoc(r.date, L) }) + (held ? ' ' + p[2] : '') };
+}
+
 const timeFr = (t) => new Date(t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' });
 const todayParis = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Paris' });
 function fail(status, message, code) { const e = new Error(message); e.status = status; if (code) e.code = code; throw e; }
+
+/* Limitation de débit en mémoire (anti force brute et anti-spam) */
+const hits = new Map();
+const clientIp = (req) => String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '?';
+function limitKey(key, max, windowMs) {
+  const t = now(), a = (hits.get(key) || []).filter((x) => t - x < windowMs);
+  if (a.length >= max) fail(429, 'Trop de tentatives. Réessayez dans quelques minutes.');
+  a.push(t); hits.set(key, a);
+}
+const limit = (req, name, max, windowMs) => limitKey(name + '|' + clientIp(req), max, windowMs);
+setInterval(() => { const t = now(); for (const [k, a] of hits) if (!a.length || t - a[a.length - 1] > 3600000) hits.delete(k); }, 600000).unref();
 
 function hashPw(pw) { const salt = crypto.randomBytes(16).toString('hex'); return salt + ':' + crypto.scryptSync(pw, salt, 64).toString('hex'); }
 function checkPw(pw, stored) {
@@ -131,7 +170,7 @@ const LEGAL = {
 const DEFAULT_SETTINGS = { requestTtlMin: 120, payTtlMin: 60, stripePct: 0.015, stripeFixed: 25 };
 function getSettings() {
   const s = { ...DEFAULT_SETTINGS };
-  for (const r of q('SELECT key, value FROM settings').all()) s[r.key] = JSON.parse(r.value);
+  for (const r of q('SELECT key, value FROM settings').all()) if (r.key in DEFAULT_SETTINGS) s[r.key] = JSON.parse(r.value);
   s.commissionRate = COMMISSION_RATE;
   return s;
 }
@@ -143,8 +182,8 @@ function computeSplit(amount, s = getSettings()) {
 }
 
 /* E-mails : enregistrés en base, envoyés via Resend si configuré */
-function sendEmail(to, subject, body) {
-  q('INSERT INTO emails(id,to_addr,subject,body,at) VALUES(?,?,?,?,?)').run(newId('em_'), to, subject, body, now());
+function sendEmail(to, subject, body, stored) {
+  q('INSERT INTO emails(id,to_addr,subject,body,at) VALUES(?,?,?,?,?)').run(newId('em_'), to, subject, stored || body, now());
   if (!env.RESEND_API_KEY) return;
   fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -214,11 +253,10 @@ async function apnsDeliver(token, payload) {
   }
   return { ok: false, tries };
 }
-async function sendPush(userId, title, body, url) {
+async function sendApns(userId, title, body, url) {
   if (!APNS.enabled) return;
   const payload = { aps: { alert: { title, body }, sound: 'default' }, url: url || '#/h' };
   const tokens = q('SELECT * FROM push_tokens WHERE user_id=?').all(userId);
-  if (!tokens.length) console.warn('APNs : aucun iPhone enregistré pour cet hôte (ouvrez l’app et activez les notifications)');
   for (const t of tokens) {
     const d = await apnsDeliver(t.token, payload);
     if (d.ok) { console.log('APNs envoyé', t.token.slice(0, 8), d.env); continue; }
@@ -226,6 +264,64 @@ async function sendPush(userId, title, body, url) {
     if (all.every(isTokenError)) { q('DELETE FROM push_tokens WHERE token=?').run(t.token); console.warn('APNs : iPhone désinscrit, jeton supprimé', t.token.slice(0, 8)); }
     else console.error('APNs échec', t.token.slice(0, 8), Object.entries(d.tries).map(([e, r]) => `${e} ${r.status} ${r.reason}`).join(' | '));
   }
+}
+
+/* ------------------------------------------------------------------ Notifications web (Web Push, RFC 8291 + VAPID RFC 8292)
+   Pour les hôtes qui utilisent le site sans l'app iPhone : Chrome, Edge, Firefox, Android,
+   et Safari sur iPhone une fois le site ajouté à l'écran d'accueil. Aucune dépendance. */
+const VAPID = (() => {
+  let row = q("SELECT value FROM secrets WHERE key='vapid'").get();
+  if (!row) {
+    const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const jwk = publicKey.export({ format: 'jwk' });
+    const pub = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]).toString('base64url');
+    q("INSERT INTO secrets(key,value) VALUES('vapid',?)").run(JSON.stringify({ pem: privateKey.export({ type: 'pkcs8', format: 'pem' }), pub }));
+    row = q("SELECT value FROM secrets WHERE key='vapid'").get();
+  }
+  return JSON.parse(row.value);
+})();
+const PUSH_HOSTS = /(^|\.)(fcm\.googleapis\.com|push\.apple\.com|push\.services\.mozilla\.com|notify\.windows\.com)$/;
+function pushEndpointOk(endpoint) { try { const u = new URL(endpoint); return u.protocol === 'https:' && PUSH_HOSTS.test(u.hostname); } catch (e) { return false; } }
+function webPushEncrypt(sub, payload) {
+  const ua = Buffer.from(sub.p256dh, 'base64url'), auth = Buffer.from(sub.auth, 'base64url');
+  const ecdh = crypto.createECDH('prime256v1'); ecdh.generateKeys();
+  const as = ecdh.getPublicKey(), secret = ecdh.computeSecret(ua);
+  const hmac = (k, d) => crypto.createHmac('sha256', k).update(d).digest();
+  const ikm = hmac(hmac(auth, secret), Buffer.concat([Buffer.from('WebPush: info\0'), ua, as, Buffer.from([1])]));
+  const salt = crypto.randomBytes(16), prk = hmac(salt, ikm);
+  const cek = hmac(prk, Buffer.from('Content-Encoding: aes128gcm\0\x01', 'latin1')).subarray(0, 16);
+  const nonce = hmac(prk, Buffer.from('Content-Encoding: nonce\0\x01', 'latin1')).subarray(0, 12);
+  const c = crypto.createCipheriv('aes-128-gcm', cek, nonce);
+  const ct = Buffer.concat([c.update(Buffer.concat([payload, Buffer.from([2])])), c.final(), c.getAuthTag()]);
+  const head = Buffer.alloc(21); salt.copy(head, 0); head.writeUInt32BE(4096, 16); head[20] = as.length;
+  return Buffer.concat([head, as, ct]);
+}
+function vapidAuth(endpoint) {
+  const enc = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const sub = isEmail(ADMIN_EMAIL) ? 'mailto:' + ADMIN_EMAIL : APP_URL;
+  const data = enc({ typ: 'JWT', alg: 'ES256' }) + '.' + enc({ aud: new URL(endpoint).origin, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub });
+  const sig = crypto.sign('sha256', Buffer.from(data), { key: VAPID.pem, dsaEncoding: 'ieee-p1363' }).toString('base64url');
+  return `vapid t=${data}.${sig}, k=${VAPID.pub}`;
+}
+async function webPushSend(sub, message) {
+  if (!pushEndpointOk(sub.endpoint)) return { status: -1, reason: 'adresse de notification non reconnue' };
+  try {
+    const r = await fetch(sub.endpoint, { method: 'POST', body: webPushEncrypt(sub, Buffer.from(JSON.stringify(message))), signal: AbortSignal.timeout(10000),
+      headers: { TTL: '3600', Urgency: 'high', 'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', Authorization: vapidAuth(sub.endpoint) } });
+    return { status: r.status, reason: r.ok ? '' : (await r.text().catch(() => '')).slice(0, 200) };
+  } catch (e) { return { status: 0, reason: e.message }; }
+}
+async function sendWebPush(userId, title, body, url) {
+  const out = [];
+  for (const sub of q('SELECT * FROM web_push_subs WHERE user_id=?').all(userId)) {
+    const r = await webPushSend(sub, { title, body, url: url || '#/h' }); out.push(r);
+    if (r.status === 404 || r.status === 410) q('DELETE FROM web_push_subs WHERE endpoint=?').run(sub.endpoint);
+    else if (r.status < 200 || r.status >= 300) console.error('Web Push échec', r.status, r.reason);
+  }
+  return out;
+}
+async function sendPush(userId, title, body, url) {
+  await Promise.allSettled([sendApns(userId, title, body, url), sendWebPush(userId, title, body, url)]);
 }
 
 /* ------------------------------------------------------------------ Factures de commission (mensuelles) et avoirs */
@@ -445,7 +541,7 @@ function readDoc(t) {
   const [b, sig] = String(t).split('.'); if (!b || !sig) return null;
   const exp = crypto.createHmac('sha256', DOC_SECRET).update(b).digest('base64url');
   if (sig.length !== exp.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(exp))) return null;
-  const p = JSON.parse(Buffer.from(b, 'base64url').toString('utf8')); return p.exp > now() ? p : null;
+  try { const p = JSON.parse(Buffer.from(b, 'base64url').toString('utf8')); return p.exp > now() ? p : null; } catch (e) { return null; }
 }
 
 /* ------------------------------------------------------------------ Client Stripe (API REST) */
@@ -509,7 +605,7 @@ function verifyStripeSignature(raw, header) {
 /* ------------------------------------------------------------------ Sérialisation (ce que le navigateur reçoit) */
 const parseJson = (s) => { try { return JSON.parse(s || '{}') || {}; } catch (e) { return {}; } };
 const outUser = (u) => ({ billing: parseJson(u.billing), id: u.id, role: u.role, name: u.name, email: u.email, status: u.status, stripeAccount: u.stripe_account, payoutsReady: !!u.payouts_ready, detailsSubmitted: !!u.details_submitted, createdAt: u.created_at });
-const outListing = (l) => ({ id: l.id, hostId: l.host_id, name: l.name, address: l.address, photo: l.photo, checkout: l.checkout, prices: JSON.parse(l.prices), paused: !!l.paused, deleted: !!l.deleted, slug: l.slug, createdAt: l.created_at });
+const outListing = (l) => ({ id: l.id, hostId: l.host_id, name: l.name, address: l.address, photo: l.photo ? `/api/photo/${l.id}?v=${l.photo_v || 1}` : null, checkout: l.checkout, prices: JSON.parse(l.prices), paused: !!l.paused, deleted: !!l.deleted, slug: l.slug, createdAt: l.created_at });
 const outRequest = (r, asGuest = false) => ({
   id: r.id, listingId: r.listing_id, hostId: r.host_id, guestName: r.guest_name, guestEmail: r.guest_email,
   guestToken: asGuest ? r.guest_token : undefined, payToken: asGuest ? r.pay_token : undefined,
@@ -520,6 +616,7 @@ const outPayment = (p) => ({ id: p.id, requestId: p.request_id, hostId: p.host_i
 const outEmail = (e) => ({ id: e.id, to: e.to_addr, subject: e.subject, body: e.body, at: e.at });
 
 /* ------------------------------------------------------------------ Sessions */
+const SESSION_TTL = 30 * 86400000;
 function cookies(req) {
   const o = {};
   for (const p of (req.headers.cookie || '').split(';')) { const i = p.indexOf('='); if (i > 0) o[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim()); }
@@ -527,7 +624,7 @@ function cookies(req) {
 }
 function currentUser(req) {
   const t = cookies(req).lc_sid; if (!t) return null;
-  return q('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?').get(t) || null;
+  return q('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.created_at > ?').get(t, now() - SESSION_TTL) || null;
 }
 function openSession(res, userId) {
   const t = newToken();
@@ -550,13 +647,13 @@ function sweep() {
   for (const r of q("SELECT * FROM requests WHERE status='pending' AND expires_at < ?").all(t)) {
     if (q("UPDATE requests SET status='expired', expired_reason='host' WHERE id=? AND status='pending'").run(r.id).changes) {
       if (r.payment_intent) releaseHold(r.payment_intent);
-      sendEmail(r.guest_email, 'Votre demande de départ tardif a expiré', `Bonjour ${r.guest_name},\n\nVotre hôte n'a pas répondu à temps. Le montant réservé sur votre carte est libéré : rien n'a été prélevé. Merci de libérer le logement à ${r.old_time}.`);
+      gMail(r, 'expired', { old: r.old_time });
     }
   }
   for (const r of q("SELECT * FROM requests WHERE status='accepted' AND pay_expires_at < ?").all(t)) {
     if (q("UPDATE requests SET status='expired', expired_reason='payment', pay_token=NULL WHERE id=? AND status='accepted'").run(r.id).changes) {
       if (r.checkout_session) stripe('POST', `/checkout/sessions/${r.checkout_session}/expire`).catch(() => {});
-      sendEmail(r.guest_email, 'Votre lien de paiement a expiré', `Bonjour ${r.guest_name},\n\nLe lien de paiement a expiré : votre départ tardif n'est pas confirmé. Merci de libérer le logement à ${r.old_time}.`);
+      gMail(r, 'paylink', { old: r.old_time });
     }
   }
 }
@@ -595,7 +692,7 @@ function recordCapturedPayment(r, pi) {
   q("UPDATE requests SET status='paid', paid_at=?, decided_at=COALESCE(decided_at, ?) WHERE id=?").run(now(), now(), r.id);
   const l = q('SELECT * FROM listings WHERE id=?').get(r.listing_id);
   const host = q('SELECT * FROM users WHERE id=?').get(r.host_id);
-  sendEmail(r.guest_email, 'Votre départ tardif est confirmé', `Bonjour ${r.guest_name},\n\nVotre hôte a accepté : vous pouvez rester jusqu'à ${hFmt(r.new_time)} le ${dayFr(r.date)} à « ${l.name} ».\n${eur(amount)} ont été prélevés sur votre carte.`);
+  gMail(r, 'confirmed', { time: r.new_time, date: r.date, name: l.name, amount });
   sendEmail(host.email, 'Départ tardif vendu', `${r.guest_name} part à ${r.new_time} le ${dayFr(r.date)} (« ${l.name} »). Paiement de ${eur(amount)} encaissé.\nCommission LateCheck : ${eur(commission)} · frais de paiement : ${eur(appFee - commission)} · net pour vous : ${eur(amount - appFee)}.`);
   return true;
 }
@@ -610,10 +707,8 @@ async function openCheckout(r) {
   const split = computeSplit(r.price);
   const expiresAt = now() + 31 * 60000; // minimum imposé par Stripe : 30 min
   const s = await stripe('POST', '/checkout/sessions', {
-    mode: 'payment', locale: 'fr', customer_email: r.guest_email,
-    line_items: [{ quantity: 1, price_data: { currency: 'eur', unit_amount: r.price, product_data: {
-      name: `Départ tardif ${hoursLabel(r.hours)} — ${l.name}`,
-      description: `Départ à ${r.new_time} au lieu de ${r.old_time}, le ${dayFr(r.date)}. Montant réservé, prélevé seulement si l'hôte accepte.` } } }],
+    mode: 'payment', locale: langOf(r), customer_email: r.guest_email,
+    line_items: [{ quantity: 1, price_data: { currency: 'eur', unit_amount: r.price, product_data: gProduct(r, l, true) } }],
     payment_intent_data: {
       capture_method: 'manual',
       application_fee_amount: split.applicationFee,
@@ -644,7 +739,7 @@ async function onCheckoutAuthorized(s) {
   const host = q('SELECT * FROM users WHERE id=?').get(r.host_id);
   sendPush(host.id, 'Nouvelle demande de départ tardif', `${r.guest_name} · ${hoursLabel(r.hours)} (jusqu'à ${r.new_time}) · ${eur(r.price)} · ${l.name}`, `#/h/requests/${r.id}`).catch((e) => console.error('push', e.message));
   sendEmail(host.email, 'Nouvelle demande de départ tardif', `${r.guest_name} demande ${hoursLabel(r.hours)} (départ à ${r.new_time}) le ${dayFr(r.date)} pour « ${l.name} ».\nLe paiement de ${eur(r.price)} est déjà réservé : acceptez pour l'encaisser.\nRépondez avant ${timeFr(exp)} : ${APP_URL}/#/h/requests/${r.id}`);
-  sendEmail(r.guest_email, 'Votre demande a bien été envoyée', `Bonjour ${r.guest_name},\n\nVotre demande de départ à ${r.new_time} a été transmise à votre hôte.\n${eur(r.price)} sont réservés sur votre carte : ils ne seront prélevés que si votre hôte accepte.\nSuivre la demande : ${APP_URL}/#/r/${r.id}/${r.guest_token}`);
+  gMail(r, 'sent', { time: r.new_time, amount: r.price, link: `${APP_URL}/#/r/${r.id}/${r.guest_token}` });
 }
 
 /* ------------------------------------------------------------------ Rattrapage sans webhook
@@ -666,8 +761,26 @@ setInterval(async () => {
   try {
     const recent = q("SELECT * FROM requests WHERE checkout_session IS NOT NULL AND status IN ('awaiting_payment','abandoned') AND expires_at > ? ORDER BY expires_at DESC LIMIT 25").all(now() - 2 * 3600000);
     for (const r of recent) { try { await reconcileCheckout(r); } catch (e) { console.error('rattrapage', r.id, e.message); } }
+    // Encaissement interrompu (redémarrage du serveur pendant « Accepter ») : on relit l'état réel chez Stripe
+    for (const r of q("SELECT * FROM requests WHERE status='capturing' AND decided_at < ?").all(now() - 120000)) {
+      try {
+        const pi = await stripe('GET', `/payment_intents/${r.payment_intent}`, PI_EXPAND);
+        if (pi.status === 'succeeded') recordCapturedPayment(r, pi);
+        else q("UPDATE requests SET status=?, expired_reason=? WHERE id=? AND status='capturing'").run(pi.status === 'requires_capture' ? 'pending' : 'expired', pi.status === 'requires_capture' ? null : 'payment', r.id);
+      } catch (e) { console.error('rattrapage encaissement', r.id, e.message); }
+    }
   } finally { reconciling = false; }
 }, 60000).unref();
+
+/* Un logement n'a qu'un départ par jour : dès qu'une demande est encaissée, les autres demandes
+   en attente pour la même date sont refusées et leur empreinte libérée. */
+function refuseCompeting(r) {
+  for (const o of q("SELECT * FROM requests WHERE listing_id=? AND date=? AND id<>? AND status='pending'").all(r.listing_id, r.date, r.id)) {
+    if (!q("UPDATE requests SET status='refused', decided_at=? WHERE id=? AND status='pending'").run(now(), o.id).changes) continue;
+    if (o.payment_intent) releaseHold(o.payment_intent);
+    gMail(o, 'taken', { old: o.old_time });
+  }
+}
 
 /* ------------------------------------------------------------------ Paiements confirmés par webhook */
 function markRefunded(paymentId) {
@@ -677,7 +790,7 @@ function markRefunded(paymentId) {
   q("UPDATE requests SET status='refunded' WHERE id=?").run(p.request_id);
   issueCreditNote(p);
   const host = q('SELECT * FROM users WHERE id=?').get(p.host_id);
-  if (r) sendEmail(r.guest_email, 'Remboursement de votre départ tardif', `Bonjour ${r.guest_name},\n\n${eur(p.amount)} vous ont été remboursés. Le départ tardif est annulé : merci de libérer le logement à ${r.old_time}.`);
+  if (r) gMail(r, 'refunded', { amount: p.amount, old: r.old_time });
   if (host) sendEmail(host.email, 'Paiement remboursé', `Le paiement de ${eur(p.amount)} de ${r ? r.guest_name : 'votre voyageur'} a été remboursé.`);
   return true;
 }
@@ -714,7 +827,7 @@ async function onCheckoutCompleted(s) {
   q("UPDATE requests SET status='paid', paid_at=?, pay_token_used=pay_token, pay_token=NULL WHERE id=?").run(now(), r.id);
   const l = q('SELECT * FROM listings WHERE id=?').get(r.listing_id);
   const host = q('SELECT * FROM users WHERE id=?').get(r.host_id);
-  sendEmail(r.guest_email, 'Votre départ tardif est confirmé', `Bonjour ${r.guest_name},\n\nPaiement de ${eur(pi.amount)} reçu. Votre départ tardif est confirmé : vous pouvez rester jusqu'à ${hFmt(r.new_time)} le ${dayFr(r.date)} à « ${l.name} ».`);
+  gMail(r, 'confirmed', { time: r.new_time, date: r.date, name: l.name, amount: pi.amount });
   sendEmail(host.email, 'Départ tardif payé', `${r.guest_name} a payé ${eur(pi.amount)} pour partir à ${r.new_time} le ${dayFr(r.date)} (« ${l.name} »).\nCommission LateCheck : ${eur(commission)} · frais de paiement : ${eur(appFee - commission)} · net pour vous : ${eur(pi.amount - appFee)}.`);
 }
 async function handleStripeEvent(ev) {
@@ -733,7 +846,7 @@ async function handleStripeEvent(ev) {
     case 'payment_intent.canceled': {
       const r = q("SELECT * FROM requests WHERE payment_intent=? AND status='pending'").get(o.id);
       if (r && q("UPDATE requests SET status='expired', expired_reason='host' WHERE id=? AND status='pending'").run(r.id).changes)
-        sendEmail(r.guest_email, 'Votre demande de départ tardif a expiré', `Bonjour ${r.guest_name},\n\nLe montant réservé sur votre carte est libéré : rien n'a été prélevé.`);
+        gMail(r, 'released');
       return;
     }
     case 'checkout.session.expired': {
@@ -777,7 +890,7 @@ route('GET', '/api/state', (req) => {
   sweep();
   const u = currentUser(req);
   const out = { me: null, hasAdmin: !!q("SELECT 1 FROM users WHERE role='admin'").get(), adminConfigured: !!ADMIN_EMAIL,
-    stripeMode: STRIPE_MODE, pushEnabled: APNS.enabled, legal: LEGAL, users: [], listings: [], requests: [], payments: [], emails: [], settings: getSettings(), guest: null };
+    stripeMode: STRIPE_MODE, pushEnabled: APNS.enabled, legal: LEGAL, appUrl: APP_URL, webPushKey: VAPID.pub, users: [], listings: [], requests: [], payments: [], emails: [], settings: getSettings(), guest: null };
   if (u && u.status === 'active') {
     out.me = outUser(u);
     if (u.role === 'admin') {
@@ -813,6 +926,7 @@ route('GET', '/api/state', (req) => {
 
 /* Authentification */
 route('POST', '/api/auth/signup', (req, res) => {
+  limit(req, 'signup', 8, 3600000);
   const name = String(req.body.name || '').trim().slice(0, 80), email = String(req.body.email || '').trim().toLowerCase(), pw = String(req.body.password || '');
   if (!name || !isEmail(email)) fail(400, 'Renseignez un nom et un e-mail valide.');
   if (pw.length < 8) fail(400, 'Le mot de passe doit contenir au moins 8 caractères.');
@@ -826,6 +940,7 @@ route('POST', '/api/auth/signup', (req, res) => {
 });
 route('POST', '/api/auth/login', (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
+  limit(req, 'login', 20, 900000); limitKey('login-mail|' + email, 10, 900000);
   const u = q('SELECT * FROM users WHERE email=?').get(email);
   if (!u || !checkPw(String(req.body.password || ''), u.pw)) fail(401, 'E-mail ou mot de passe incorrect.');
   if (u.status !== 'active') fail(403, 'Ce compte est suspendu.');
@@ -836,7 +951,36 @@ route('POST', '/api/auth/logout', (req, res) => {
   const t = cookies(req).lc_sid; if (t) q('DELETE FROM sessions WHERE token=?').run(t);
   res.setHeader('Set-Cookie', 'lc_sid=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0');
 });
+/* Mot de passe oublié : lien valable 1 h, envoyé par e-mail. La réponse est la même que le compte existe ou non. */
+const sha = (x) => crypto.createHash('sha256').update(x).digest('hex');
+route('POST', '/api/auth/forgot', (req) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  limit(req, 'forgot', 6, 3600000); limitKey('forgot-mail|' + email, 3, 3600000);
+  const u = isEmail(email) && q("SELECT * FROM users WHERE email=? AND status='active'").get(email);
+  if (u) {
+    const token = newToken();
+    q('DELETE FROM password_resets WHERE user_id=?').run(u.id);
+    q('INSERT INTO password_resets(token_hash,user_id,expires_at) VALUES(?,?,?)').run(sha(token), u.id, now() + 3600000);
+    const text = (link) => `Bonjour ${u.name},\n\nPour choisir un nouveau mot de passe LateCheck, ouvrez ce lien (valable 1 heure) :\n${link}\n\nSi vous n'êtes pas à l'origine de cette demande, ignorez cet e-mail : votre mot de passe reste inchangé.`;
+    sendEmail(u.email, 'Réinitialisez votre mot de passe LateCheck', text(`${APP_URL}/#/reset/${token}`), text('[lien envoyé par e-mail]'));
+  }
+  return { ok: true, emailConfigured: !!env.RESEND_API_KEY };
+});
+route('POST', '/api/auth/reset', (req, res) => {
+  limit(req, 'reset', 10, 3600000);
+  const row = q('SELECT * FROM password_resets WHERE token_hash=?').get(sha(String(req.body.token || '')));
+  if (!row || row.expires_at < now()) fail(410, 'Ce lien a expiré ou a déjà été utilisé. Refaites une demande.');
+  const u = q("SELECT * FROM users WHERE id=? AND status='active'").get(row.user_id); if (!u) fail(410, 'Ce lien n\'est plus valable.');
+  const pw = String(req.body.password || ''), min = u.role === 'admin' ? 10 : 8;
+  if (pw.length < min) fail(400, `Le mot de passe doit contenir au moins ${min} caractères.`);
+  q('UPDATE users SET pw=? WHERE id=?').run(hashPw(pw), u.id);
+  q('DELETE FROM password_resets WHERE user_id=?').run(u.id);
+  q('DELETE FROM sessions WHERE user_id=?').run(u.id); // toutes les sessions ouvertes sont fermées
+  openSession(res, u.id);
+  return { role: u.role };
+});
 route('POST', '/api/auth/setup-admin', (req, res) => {
+  limit(req, 'setup-admin', 5, 3600000);
   if (!ADMIN_EMAIL) fail(400, 'Définissez ADMIN_EMAIL dans le fichier .env du serveur.');
   if (q("SELECT 1 FROM users WHERE role='admin'").get()) fail(409, 'Le compte administrateur existe déjà.');
   const email = String(req.body.email || '').trim().toLowerCase(), pw = String(req.body.password || '');
@@ -937,6 +1081,23 @@ route('POST', '/api/push/register', (req) => {
   return { enabled: APNS.enabled };
 });
 
+route('POST', '/api/push/web-subscribe', (req) => {
+  const u = need(req, 'host'), b = req.body || {}, k = b.keys || {};
+  const endpoint = String(b.endpoint || ''), p256dh = String(k.p256dh || ''), auth = String(k.auth || '');
+  if (endpoint.length > 1000 || !pushEndpointOk(endpoint)) fail(400, 'Ce navigateur utilise un service de notification non pris en charge.');
+  let okKeys = false; try { okKeys = Buffer.from(p256dh, 'base64url').length === 65 && Buffer.from(auth, 'base64url').length === 16; } catch (e) {}
+  if (!okKeys) fail(400, 'Abonnement aux notifications invalide.');
+  q('INSERT INTO web_push_subs(endpoint,user_id,p256dh,auth,created_at) VALUES(?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id, p256dh=excluded.p256dh, auth=excluded.auth')
+    .run(endpoint, u.id, p256dh, auth, now());
+  if (q('SELECT COUNT(*) n FROM web_push_subs WHERE user_id=?').get(u.id).n > 10) q('DELETE FROM web_push_subs WHERE endpoint IN (SELECT endpoint FROM web_push_subs WHERE user_id=? ORDER BY created_at LIMIT 1)').run(u.id);
+});
+route('POST', '/api/push/web-unsubscribe', (req) => { q('DELETE FROM web_push_subs WHERE endpoint=?').run(String((req.body || {}).endpoint || '')); });
+route('POST', '/api/push/web-test', async (req) => {
+  const u = need(req, 'host'); limit(req, 'web-test', 10, 600000);
+  const results = await sendWebPush(u.id, 'Test LateCheck', 'Les alertes fonctionnent sur cet appareil.', '#/h/account');
+  return { devices: results.length, ok: results.filter((r) => r.status >= 200 && r.status < 300).length, results };
+});
+
 /* Notifications push : diagnostic complet depuis l'app (Mon compte → Tester les notifications) */
 route('POST', '/api/push/test', async (req) => {
   const u = need(req, 'host');
@@ -962,11 +1123,13 @@ route('POST', '/api/account/delete', async (req, res) => {
   for (const r of q("SELECT * FROM requests WHERE host_id=? AND status IN ('pending','capturing','accepted','awaiting_payment')").all(u.id)) {
     q("UPDATE requests SET status='cancelled', pay_token=NULL WHERE id=?").run(r.id);
     if (r.payment_intent) await releaseHold(r.payment_intent);
-    if (r.status !== 'awaiting_payment') sendEmail(r.guest_email, 'Demande annulée', `Bonjour ${r.guest_name},\n\nCe logement n'accepte plus de demandes. Le montant réservé est libéré : rien n'a été prélevé.`);
+    if (r.status !== 'awaiting_payment') gMail(r, 'cancelled');
   }
   q("UPDATE requests SET guest_name='Voyageur', guest_email='anonyme@latecheck.invalid', message=NULL WHERE host_id=?").run(u.id);
   q('UPDATE listings SET deleted=1, paused=1, photo=NULL, name=?, address=? WHERE host_id=?').run('Logement supprimé', '', u.id);
   q('DELETE FROM push_tokens WHERE user_id=?').run(u.id);
+  q('DELETE FROM web_push_subs WHERE user_id=?').run(u.id);
+  q('DELETE FROM password_resets WHERE user_id=?').run(u.id);
   q('DELETE FROM sessions WHERE user_id=?').run(u.id);
   q('DELETE FROM emails WHERE to_addr=?').run(u.email);
   q("UPDATE users SET status='deleted', name='Compte supprimé', email=?, pw=?, stripe_account=NULL, payouts_ready=0 WHERE id=?")
@@ -978,7 +1141,7 @@ route('POST', '/api/account/delete', async (req, res) => {
 function readListingBody(b) {
   const name = String(b.name || '').trim().slice(0, 60), address = String(b.address || '').trim().slice(0, 120), checkout = String(b.checkout || '');
   if (!name || !address || !/^([01]\d|2[0-3]):[0-5]\d$/.test(checkout)) fail(400, "Renseignez le nom, l'adresse et l'heure de départ.");
-  const photo = b.photo ? String(b.photo) : null;
+  const photo = b.photo === undefined ? undefined : (b.photo ? String(b.photo) : null);
   if (photo && (!/^data:image\/(jpeg|png|webp);base64,/.test(photo) || photo.length > 2500000)) fail(400, 'Photo invalide ou trop lourde (2 Mo maximum).');
   return { name, address, checkout, photo };
 }
@@ -986,12 +1149,21 @@ const ownListing = (u, id) => { const l = q('SELECT * FROM listings WHERE id=? A
 route('POST', '/api/listings', (req) => {
   const u = need(req, 'host'); const b = readListingBody(req.body); const id = newId('lst_');
   q('INSERT INTO listings(id,host_id,name,address,photo,checkout,prices,slug,created_at) VALUES(?,?,?,?,?,?,?,?,?)')
-    .run(id, u.id, b.name, b.address, b.photo, b.checkout, JSON.stringify({ 1: 500, 2: 1000, 3: 1500, 4: 2000 }), crypto.randomBytes(6).toString('base64url'), now());
+    .run(id, u.id, b.name, b.address, b.photo || null, b.checkout, JSON.stringify({ 1: 500, 2: 1000, 3: 1500, 4: 2000 }), crypto.randomBytes(6).toString('base64url'), now());
   return { id };
 });
 route('PUT', '/api/listings/:id', (req, _res, id) => {
   const u = need(req, 'host'); ownListing(u, id); const b = readListingBody(req.body);
-  q('UPDATE listings SET name=?, address=?, photo=?, checkout=? WHERE id=?').run(b.name, b.address, b.photo, b.checkout, id);
+  q('UPDATE listings SET name=?, address=?, checkout=? WHERE id=?').run(b.name, b.address, b.checkout, id);
+  if (b.photo !== undefined) q('UPDATE listings SET photo=?, photo_v=? WHERE id=?').run(b.photo, now(), id);
+});
+route('GET', '/api/photo/:id', (req, res, id) => {
+  const l = q('SELECT photo FROM listings WHERE id=? AND deleted=0').get(id);
+  const m = l && l.photo && /^data:(image\/(?:jpeg|png|webp));base64,(.+)$/.exec(l.photo);
+  if (!m) { res.writeHead(404); res.end(); return; }
+  const buf = Buffer.from(m[2], 'base64');
+  res.writeHead(200, { 'Content-Type': m[1], 'Content-Length': buf.length, 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff' });
+  res.end(buf);
 });
 route('PUT', '/api/listings/:id/prices', (req, _res, id) => {
   const u = need(req, 'host'); ownListing(u, id); const p = req.body.prices || {}; const prices = {};
@@ -1010,7 +1182,7 @@ route('DELETE', '/api/listings/:id', (req, _res, id) => {
     q("UPDATE requests SET status='cancelled', pay_token=NULL WHERE id=?").run(r.id);
     if (r.payment_intent) releaseHold(r.payment_intent);
     if (r.checkout_session) stripe('POST', `/checkout/sessions/${r.checkout_session}/expire`).catch(() => {});
-    sendEmail(r.guest_email, 'Demande annulée', `Bonjour ${r.guest_name},\n\nCe logement n'accepte plus de demandes de départ tardif. Aucun paiement n'a été effectué.`);
+    gMail(r, 'cancelled');
   }
 });
 
@@ -1031,11 +1203,12 @@ route('POST', '/api/requests/:id/accept', async (req, _res, id) => {
     else if (st === 'requires_capture') { q("UPDATE requests SET status='pending' WHERE id=?").run(id); throw e; }
     else {
       q("UPDATE requests SET status='expired', expired_reason='payment' WHERE id=?").run(id);
-      sendEmail(r.guest_email, 'Votre demande de départ tardif', `Bonjour ${r.guest_name},\n\nLe paiement réservé n'a pas pu être encaissé : votre départ tardif n'est pas confirmé. Merci de libérer le logement à ${r.old_time}.`);
+      gMail(r, 'capture', { old: r.old_time });
       fail(409, "La réservation du paiement a expiré : rien n'a pu être encaissé. Le voyageur est prévenu.");
     }
   }
   recordCapturedPayment(r, pi);
+  refuseCompeting(r);
 });
 route('POST', '/api/requests/:id/refuse', async (req, _res, id) => {
   const u = need(req, 'host');
@@ -1044,7 +1217,7 @@ route('POST', '/api/requests/:id/refuse', async (req, _res, id) => {
   if (!q("UPDATE requests SET status='refused', decided_at=?, pay_token=NULL WHERE id=? AND status='pending'").run(now(), id).changes) fail(409, 'Cette demande a déjà été traitée.');
   if (r.payment_intent) await releaseHold(r.payment_intent);
   const l = q('SELECT * FROM listings WHERE id=?').get(r.listing_id);
-  sendEmail(r.guest_email, 'Votre demande de départ tardif', `Bonjour ${r.guest_name},\n\nVotre hôte ne peut pas accepter votre demande pour « ${l.name} ». Le montant réservé sur votre carte est libéré : rien n'a été prélevé. Merci de libérer le logement à ${r.old_time}.`);
+  gMail(r, 'refused', { name: l.name, old: r.old_time });
 });
 
 /* Remboursement (hôte propriétaire du paiement ou administrateur) */
@@ -1059,6 +1232,7 @@ route('POST', '/api/payments/:id/refund', async (req, _res, id) => {
 
 /* Voyageur (sans compte) */
 route('POST', '/api/public/requests', async (req) => {
+  limit(req, 'guest-request', 15, 3600000);
   sweep();
   const b = req.body;
   const l = q('SELECT * FROM listings WHERE slug=? AND deleted=0').get(String(b.slug || ''));
@@ -1069,27 +1243,33 @@ route('POST', '/api/public/requests', async (req) => {
   if (![1, 2, 3, 4].includes(hours)) fail(400, 'Durée invalide.');
   if (!b.acceptCgv) fail(400, 'Acceptez les conditions générales de vente pour continuer.');
   if (!name || !isEmail(email)) fail(400, 'Renseignez votre prénom et un e-mail valide.');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < todayParis()) fail(400, 'Choisissez une date de départ à venir.');
+  const dOk = /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(Date.parse(date + 'T12:00:00Z')) && new Date(date + 'T12:00:00Z').toISOString().slice(0, 10) === date;
+  if (!dOk || date < todayParis()) fail(400, 'Choisissez une date de départ à venir.');
+  if (date > new Date(Date.now() + 366 * 86400000).toISOString().slice(0, 10)) fail(400, 'Choisissez une date de départ plus proche.');
+  const newTime = addHours(l.checkout, hours);
+  if (date === todayParis() && newTime > l.checkout && timeFr(now()) >= newTime) fail(400, 'Cette heure de départ est déjà passée. Choisissez une durée plus longue ou une autre date.');
   const dup = q("SELECT * FROM requests WHERE listing_id=? AND guest_email=? AND date=? AND status IN ('pending','accepted','paid','capturing')").get(l.id, email, date);
   if (dup) return { id: dup.id, guestToken: dup.guest_token, duplicate: true, url: null };
+  if (q("SELECT 1 FROM requests WHERE listing_id=? AND date=? AND status IN ('paid','capturing')").get(l.id, date)) fail(409, 'Un départ tardif est déjà confirmé pour cette date dans ce logement.');
   const prices = JSON.parse(l.prices);
   let r = q("SELECT * FROM requests WHERE listing_id=? AND guest_email=? AND date=? AND hours=? AND status='awaiting_payment'").get(l.id, email, date, hours);
   if (!r) {
     const id = newId('req_');
-    q(`INSERT INTO requests(id,listing_id,host_id,guest_name,guest_email,guest_token,date,hours,price,old_time,new_time,message,status,created_at,expires_at,cgv_accepted_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'awaiting_payment',?,?,?)`)
-      .run(id, l.id, l.host_id, name, email, newToken(), date, hours, prices[hours], l.checkout, addHours(l.checkout, hours), message || null, now(), now() + 40 * 60000, now());
+    q(`INSERT INTO requests(id,listing_id,host_id,guest_name,guest_email,guest_token,date,hours,price,old_time,new_time,message,status,created_at,expires_at,cgv_accepted_at,lang)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'awaiting_payment',?,?,?,?)`)
+      .run(id, l.id, l.host_id, name, email, newToken(), date, hours, prices[hours], l.checkout, addHours(l.checkout, hours), message || null, now(), now() + 40 * 60000, now(), LANGS.includes(b.lang) ? b.lang : 'fr');
     r = q('SELECT * FROM requests WHERE id=?').get(id);
   }
   try { return { id: r.id, guestToken: r.guest_token, url: await openCheckout(r) }; }
   catch (e) { q("UPDATE requests SET status='abandoned' WHERE id=? AND status='awaiting_payment'").run(r.id); throw e; }
 });
 route('POST', '/api/public/requests/:id/sync', async (req, _res, id) => {
+  limit(req, 'guest-sync', 40, 600000);
   const r = q('SELECT * FROM requests WHERE id=? AND guest_token=?').get(id, String(req.body.t || ''));
   if (!r) fail(404, 'Demande introuvable.');
   await reconcileCheckout(r);
   return { status: q('SELECT status FROM requests WHERE id=?').get(id).status };
-}, { rate: 'public' });
+});
 
 route('POST', '/api/public/requests/:id/checkout', async (req, _res, id) => {
   sweep();
@@ -1113,9 +1293,8 @@ route('POST', '/api/public/pay/:token/checkout', async (req, _res, token) => {
   const split = computeSplit(r.price);
   const expiresAt = Math.max(r.pay_expires_at, now() + 31 * 60000); // Stripe exige au moins 30 min
   const s = await stripe('POST', '/checkout/sessions', {
-    mode: 'payment', locale: 'fr', customer_email: r.guest_email,
-    line_items: [{ quantity: 1, price_data: { currency: 'eur', unit_amount: r.price, product_data: {
-      name: `Départ tardif ${hoursLabel(r.hours)} — ${l.name}`, description: `Départ à ${r.new_time} au lieu de ${r.old_time}, le ${dayFr(r.date)}` } } }],
+    mode: 'payment', locale: langOf(r), customer_email: r.guest_email,
+    line_items: [{ quantity: 1, price_data: { currency: 'eur', unit_amount: r.price, product_data: gProduct(r, l, false) } }],
     payment_intent_data: {
       application_fee_amount: split.applicationFee,
       transfer_data: { destination: host.stripe_account },
@@ -1160,6 +1339,13 @@ route('POST', '/api/admin/payout', async (req) => {
   const p = await stripe('POST', '/payouts', { amount: available, currency: 'eur', description: 'Commissions LateCheck' }, { idem: `po_${todayParis()}_${available}` });
   return { amount: p.amount, arrival: p.arrival_date * 1000 };
 });
+route('GET', '/api/admin/backup', (req, res) => {
+  need(req, 'admin');
+  const f = backupDb(true); if (!f) fail(500, 'Sauvegarde impossible.');
+  res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': fs.statSync(f).size, 'Content-Disposition': `attachment; filename="${path.basename(f)}"`, 'Cache-Control': 'private, no-store' });
+  fs.createReadStream(f).pipe(res);
+});
+route('GET', '/api/health', () => ({ ok: true }));
 route('GET', '/api/admin/export.csv', (req, res) => {
   need(req, 'admin');
   const c = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
@@ -1185,15 +1371,84 @@ route('POST', '/api/stripe/webhook', async (req, res) => {
   return { received: true };
 }, { raw: true });
 
+/* ------------------------------------------------------------------ Sauvegardes et ménage
+   Une copie cohérente de la base par jour, dans le dossier « backups » à côté de la base (14 jours gardés).
+   Elle protège d'une erreur ou d'une corruption, pas de la perte du disque : téléchargez-en une de temps en temps
+   depuis l'espace administrateur. */
+function backupDb(force) {
+  if (DB_PATH === ':memory:') return null;
+  try {
+    const dir = path.join(path.dirname(DB_PATH), 'backups'); fs.mkdirSync(dir, { recursive: true });
+    const f = path.join(dir, `latecheck-${todayParis()}.db`);
+    if (fs.existsSync(f)) { if (!force) return f; fs.unlinkSync(f); }
+    db.exec(`VACUUM INTO '${f.replace(/'/g, "''")}'`);
+    const old = fs.readdirSync(dir).filter((x) => /^latecheck-\d{4}-\d{2}-\d{2}\.db$/.test(x)).sort().slice(0, -14);
+    for (const x of old) fs.unlinkSync(path.join(dir, x));
+    return f;
+  } catch (e) { console.error('sauvegarde', e.message); return null; }
+}
+function housekeeping() {
+  const t = now();
+  q('DELETE FROM sessions WHERE created_at < ?').run(t - SESSION_TTL);
+  q('DELETE FROM password_resets WHERE expires_at < ?').run(t);
+  q('DELETE FROM emails WHERE at < ?').run(t - 180 * 86400000);
+  q('DELETE FROM stripe_events WHERE received_at < ?').run(t - 60 * 86400000);
+  backupDb(false);
+}
+setTimeout(() => { try { housekeeping(); } catch (e) { console.error('ménage', e); } }, 30000).unref();
+setInterval(() => { try { housekeeping(); } catch (e) { console.error('ménage', e); } }, 6 * 3600000).unref();
+
+/* ------------------------------------------------------------------ Fichiers du site installable (écran d'accueil + notifications web) */
+const ICONS = { '/icon-180.png': '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', '/icon-192.png': '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', '/icon-512.png': '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' };
+const MANIFEST = JSON.stringify({ name: 'LateCheck', short_name: 'LateCheck', description: 'Vendez vos départs tardifs.', lang: 'fr', start_url: '/#/h', scope: '/', display: 'standalone',
+  background_color: '#F4F8F2', theme_color: '#FFFFFF', icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png' }, { src: '/icon-512.png', sizes: '512x512', type: 'image/png' }] });
+const SERVICE_WORKER = `self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener('push', (e) => {
+  let d = {}; try { d = e.data.json(); } catch (_) {}
+  e.waitUntil(self.registration.showNotification(d.title || 'LateCheck', { body: d.body || '', icon: '/icon-192.png', badge: '/icon-192.png', data: { url: d.url || '#/h' } }));
+});
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const hash = (e.notification.data && e.notification.data.url) || '#/h';
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((cs) => {
+    for (const c of cs) if ('focus' in c) { c.postMessage({ lcGo: hash }); return c.focus(); }
+    return self.clients.openWindow('/' + hash);
+  }));
+});`;
+function serveBuiltin(pathname, res) {
+  const send = (type, body, cache) => { res.writeHead(200, { 'Content-Type': type, 'Content-Length': Buffer.byteLength(body), 'Cache-Control': cache, 'X-Content-Type-Options': 'nosniff' }); res.end(body); return true; };
+  if (ICONS[pathname]) return send('image/png', Buffer.from(ICONS[pathname], 'base64'), 'public, max-age=604800');
+  if (pathname === '/apple-touch-icon.png' || pathname === '/apple-touch-icon-precomposed.png') return send('image/png', Buffer.from(ICONS['/icon-180.png'], 'base64'), 'public, max-age=604800');
+  if (pathname === '/manifest.webmanifest') return send('application/manifest+json; charset=utf-8', MANIFEST, 'public, max-age=3600');
+  if (pathname === '/sw.js') return send('text/javascript; charset=utf-8', SERVICE_WORKER, 'no-cache');
+  if (pathname === '/robots.txt') return send('text/plain; charset=utf-8', 'User-agent: *\nAllow: /\nDisallow: /api/\n', 'public, max-age=86400');
+  return false;
+}
+
 /* ------------------------------------------------------------------ Serveur HTTP */
 const PUBLIC = path.join(__dirname, 'public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8' };
-function serveStatic(pathname, res) {
-  let f = path.normalize(path.join(PUBLIC, pathname === '/' ? 'index.html' : decodeURIComponent(pathname)));
-  if (!f.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); }
-  if (!fs.existsSync(f) || fs.statSync(f).isDirectory()) f = path.join(PUBLIC, 'index.html');
-  res.writeHead(200, { 'Content-Type': TYPES[path.extname(f)] || 'application/octet-stream', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY' });
-  fs.createReadStream(f).pipe(res);
+const SEC_HEADERS = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY', ...(SECURE_COOKIE ? { 'Strict-Transport-Security': 'max-age=31536000' } : {}) };
+const staticCache = new Map();
+function serveStatic(req, pathname, res) {
+  let rel = '/'; try { rel = decodeURIComponent(pathname); } catch (e) {}
+  let f = path.normalize(path.join(PUBLIC, rel === '/' ? 'index.html' : rel));
+  if (f !== PUBLIC && !f.startsWith(PUBLIC + path.sep)) { res.writeHead(403); return res.end(); }
+  let st = null; try { st = fs.statSync(f); } catch (e) {}
+  if (!st || st.isDirectory()) { f = path.join(PUBLIC, 'index.html'); st = fs.statSync(f); }
+  let c = staticCache.get(f);
+  if (!c || c.mtime !== st.mtimeMs) {
+    const buf = fs.readFileSync(f), type = TYPES[path.extname(f)] || 'application/octet-stream';
+    c = { mtime: st.mtimeMs, buf, type, gz: /^(text\/|application\/json|image\/svg)/.test(type) ? zlib.gzipSync(buf, { level: 9 }) : null, etag: '"' + crypto.createHash('sha1').update(buf).digest('hex').slice(0, 20) + '"' };
+    staticCache.set(f, c);
+  }
+  const head = { ...SEC_HEADERS, 'Content-Type': c.type, ETag: c.etag, 'Cache-Control': 'no-cache', Vary: 'Accept-Encoding' };
+  if (req.headers['if-none-match'] === c.etag) { res.writeHead(304, head); return res.end(); }
+  const gz = c.gz && /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
+  if (gz) head['Content-Encoding'] = 'gzip';
+  const body = gz ? c.gz : c.buf; head['Content-Length'] = body.length;
+  res.writeHead(200, head); res.end(req.method === 'HEAD' ? undefined : body);
 }
 function readBody(req, limit) {
   return new Promise((resolve, reject) => {
@@ -1202,12 +1457,19 @@ function readBody(req, limit) {
     req.on('end', () => resolve(Buffer.concat(chunks))); req.on('error', reject);
   });
 }
-function sendJson(res, status, data) { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); }
+function sendJson(res, status, data) {
+  let body = Buffer.from(JSON.stringify(data));
+  const head = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
+  if (res.gzipOk && body.length > 1400) { body = zlib.gzipSync(body); head['Content-Encoding'] = 'gzip'; head.Vary = 'Accept-Encoding'; }
+  head['Content-Length'] = body.length;
+  res.writeHead(status, head); res.end(body);
+}
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
-    if (!url.pathname.startsWith('/api/')) return serveStatic(url.pathname, res);
+    res.gzipOk = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
+    if (!url.pathname.startsWith('/api/')) { if (serveBuiltin(url.pathname, res)) return; return serveStatic(req, url.pathname, res); }
     const rt = routes.find((r) => r.method === req.method && r.re.test(url.pathname));
     if (!rt) return sendJson(res, 404, { error: 'Introuvable.' });
     // Protection CSRF : toute écriture depuis le navigateur porte l'en-tête X-LC
@@ -1227,4 +1489,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 server.listen(PORT, () => console.log(`✅ LateCheck sur ${APP_URL} (Stripe ${STRIPE_MODE})`));
+/* Une promesse rejetée sans gestionnaire ne doit jamais arrêter le serveur ; à l'arrêt (déploiement), on ferme proprement la base. */
+process.on('unhandledRejection', (e) => console.error('Promesse rejetée', e));
+process.on('uncaughtException', (e) => console.error('Erreur non interceptée', e));
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { server.close(() => { try { db.close(); } catch (e) {} process.exit(0); }); setTimeout(() => process.exit(0), 8000).unref(); });
 module.exports = server;
