@@ -90,6 +90,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS web_push_subs(endpoint TEXT PRIMARY KEY, use
 CREATE TABLE IF NOT EXISTS password_resets(token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS secrets(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
 try { db.exec('ALTER TABLE listings ADD COLUMN photo_v INTEGER'); } catch (e) { /* colonne déjà présente */ }
+try { db.exec('ALTER TABLE requests ADD COLUMN lang TEXT'); } catch (e) { /* colonne déjà présente */ }
 
 /* Passage du mode test au mode réel : les comptes Stripe de test n'existent pas en réel.
    On réinitialise les connexions Stripe et on efface les demandes et paiements fictifs.
@@ -116,6 +117,27 @@ const hoursLabel = (h) => '+' + h + (h > 1 ? ' heures' : ' heure');
 const hFmt = (t) => { const [a, b] = t.split(':'); return Number(a) + ' h' + (b === '00' ? '' : ' ' + b); };
 const addHours = (hhmm, h) => { const [a, b] = hhmm.split(':').map(Number); const m = (a * 60 + b + h * 60) % 1440; return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); };
 const dayFr = (d) => new Date(d + 'T12:00:00').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+/* ------------------------------------------------------------------ Langues du parcours voyageur
+   Le voyageur choisit sa langue sur la page du QR code : ses e-mails et la page de paiement Stripe suivent. */
+const LANGS = ['fr', 'en', 'it', 'es', 'de', 'pt'];
+const LOCALE = { fr: 'fr-FR', en: 'en-GB', it: 'it-IT', es: 'es-ES', de: 'de-DE', pt: 'pt-PT' };
+const GI = {"hello": {"fr": "Bonjour", "en": "Hello", "it": "Ciao", "es": "Hola", "de": "Hallo", "pt": "Olá"}, "hours": {"fr": ["heure", "heures"], "en": ["hour", "hours"], "it": ["ora", "ore"], "es": ["hora", "horas"], "de": ["Stunde", "Stunden"], "pt": ["hora", "horas"]}, "product": {"fr": ["Départ tardif", "Départ à {time} au lieu de {old}, le {date}.", "Montant réservé, prélevé seulement si l'hôte accepte."], "en": ["Late check-out", "Check-out at {time} instead of {old}, on {date}.", "Amount held, charged only if the host accepts."], "it": ["Check-out posticipato", "Check-out alle {time} invece delle {old}, {date}.", "Importo bloccato, addebitato solo se l'host accetta."], "es": ["Salida tardía", "Salida a las {time} en lugar de las {old}, el {date}.", "Importe retenido, cobrado solo si el anfitrión acepta."], "de": ["Später Check-out", "Check-out um {time} Uhr statt {old} Uhr, am {date}.", "Betrag reserviert, wird nur abgebucht, wenn der Gastgeber zustimmt."], "pt": ["Saída tardia", "Saída às {time} em vez das {old}, {date}.", "Montante reservado, cobrado apenas se o anfitrião aceitar."]}, "mail": {"sent": {"fr": ["Votre demande a bien été envoyée", "Votre demande de départ à {time} a été transmise à votre hôte.\n{amount} sont réservés sur votre carte : ils ne seront prélevés que si votre hôte accepte.\nSuivre la demande : {link}"], "en": ["Your request has been sent", "Your request to check out at {time} has been sent to your host.\n{amount} is held on your card: it will only be charged if your host accepts.\nTrack your request: {link}"], "it": ["La tua richiesta è stata inviata", "La tua richiesta di check-out alle {time} è stata inviata al tuo host.\n{amount} sono bloccati sulla tua carta: saranno addebitati solo se l'host accetta.\nSegui la richiesta: {link}"], "es": ["Tu solicitud se ha enviado", "Tu solicitud de salida a las {time} se ha enviado a tu anfitrión.\n{amount} quedan retenidos en tu tarjeta: solo se cobrarán si tu anfitrión acepta.\nSeguir la solicitud: {link}"], "de": ["Ihre Anfrage wurde gesendet", "Ihre Anfrage für einen Check-out um {time} Uhr wurde an Ihren Gastgeber gesendet.\n{amount} sind auf Ihrer Karte reserviert: Der Betrag wird nur abgebucht, wenn Ihr Gastgeber zustimmt.\nAnfrage verfolgen: {link}"], "pt": ["O seu pedido foi enviado", "O seu pedido de saída às {time} foi enviado ao seu anfitrião.\n{amount} ficam reservados no seu cartão: só serão cobrados se o anfitrião aceitar.\nAcompanhar o pedido: {link}"]}, "confirmed": {"fr": ["Votre départ tardif est confirmé", "Votre hôte a accepté : vous pouvez rester jusqu'à {time} le {date} à « {name} ».\n{amount} ont été prélevés sur votre carte."], "en": ["Your late check-out is confirmed", "Your host has accepted: you can stay until {time} on {date} at \"{name}\".\n{amount} has been charged to your card."], "it": ["Il tuo check-out posticipato è confermato", "Il tuo host ha accettato: puoi restare fino alle {time} di {date} presso «{name}».\n{amount} sono stati addebitati sulla tua carta."], "es": ["Tu salida tardía está confirmada", "Tu anfitrión ha aceptado: puedes quedarte hasta las {time} del {date} en «{name}».\nSe han cobrado {amount} en tu tarjeta."], "de": ["Ihr später Check-out ist bestätigt", "Ihr Gastgeber hat zugestimmt: Sie können am {date} bis {time} Uhr in „{name}“ bleiben.\n{amount} wurden von Ihrer Karte abgebucht."], "pt": ["A sua saída tardia está confirmada", "O seu anfitrião aceitou: pode ficar até às {time} de {date} em «{name}».\n{amount} foram cobrados no seu cartão."]}, "refused": {"fr": ["Votre demande de départ tardif", "Votre hôte ne peut pas accepter votre demande pour « {name} ». Le montant réservé sur votre carte est libéré : rien n'a été prélevé. Merci de libérer le logement à {old}."], "en": ["Your late check-out request", "Your host cannot accept your request for \"{name}\". The amount held on your card has been released: nothing was charged. Please check out at {old}."], "it": ["La tua richiesta di check-out posticipato", "Il tuo host non può accettare la tua richiesta per «{name}». L'importo bloccato sulla tua carta è stato sbloccato: non è stato addebitato nulla. Ti preghiamo di lasciare l'alloggio alle {old}."], "es": ["Tu solicitud de salida tardía", "Tu anfitrión no puede aceptar tu solicitud para «{name}». El importe retenido en tu tarjeta se ha liberado: no se ha cobrado nada. Por favor, deja el alojamiento a las {old}."], "de": ["Ihre Anfrage für einen späten Check-out", "Ihr Gastgeber kann Ihre Anfrage für „{name}“ leider nicht annehmen. Der auf Ihrer Karte reservierte Betrag wurde freigegeben: Es wurde nichts abgebucht. Bitte verlassen Sie die Unterkunft um {old} Uhr."], "pt": ["O seu pedido de saída tardia", "O seu anfitrião não pode aceitar o seu pedido para «{name}». O montante reservado no seu cartão foi libertado: nada foi cobrado. Por favor, deixe o alojamento às {old}."]}, "expired": {"fr": ["Votre demande de départ tardif a expiré", "Votre hôte n'a pas répondu à temps. Le montant réservé sur votre carte est libéré : rien n'a été prélevé. Merci de libérer le logement à {old}."], "en": ["Your late check-out request has expired", "Your host did not reply in time. The amount held on your card has been released: nothing was charged. Please check out at {old}."], "it": ["La tua richiesta di check-out posticipato è scaduta", "Il tuo host non ha risposto in tempo. L'importo bloccato sulla tua carta è stato sbloccato: non è stato addebitato nulla. Ti preghiamo di lasciare l'alloggio alle {old}."], "es": ["Tu solicitud de salida tardía ha caducado", "Tu anfitrión no ha respondido a tiempo. El importe retenido en tu tarjeta se ha liberado: no se ha cobrado nada. Por favor, deja el alojamiento a las {old}."], "de": ["Ihre Anfrage für einen späten Check-out ist abgelaufen", "Ihr Gastgeber hat nicht rechtzeitig geantwortet. Der auf Ihrer Karte reservierte Betrag wurde freigegeben: Es wurde nichts abgebucht. Bitte verlassen Sie die Unterkunft um {old} Uhr."], "pt": ["O seu pedido de saída tardia expirou", "O seu anfitrião não respondeu a tempo. O montante reservado no seu cartão foi libertado: nada foi cobrado. Por favor, deixe o alojamento às {old}."]}, "released": {"fr": ["Votre demande de départ tardif a expiré", "Le montant réservé sur votre carte est libéré : rien n'a été prélevé."], "en": ["Your late check-out request has expired", "The amount held on your card has been released: nothing was charged."], "it": ["La tua richiesta di check-out posticipato è scaduta", "L'importo bloccato sulla tua carta è stato sbloccato: non è stato addebitato nulla."], "es": ["Tu solicitud de salida tardía ha caducado", "El importe retenido en tu tarjeta se ha liberado: no se ha cobrado nada."], "de": ["Ihre Anfrage für einen späten Check-out ist abgelaufen", "Der auf Ihrer Karte reservierte Betrag wurde freigegeben: Es wurde nichts abgebucht."], "pt": ["O seu pedido de saída tardia expirou", "O montante reservado no seu cartão foi libertado: nada foi cobrado."]}, "paylink": {"fr": ["Votre lien de paiement a expiré", "Le lien de paiement a expiré : votre départ tardif n'est pas confirmé. Merci de libérer le logement à {old}."], "en": ["Your payment link has expired", "The payment link has expired: your late check-out is not confirmed. Please check out at {old}."], "it": ["Il link di pagamento è scaduto", "Il link di pagamento è scaduto: il tuo check-out posticipato non è confermato. Ti preghiamo di lasciare l'alloggio alle {old}."], "es": ["Tu enlace de pago ha caducado", "El enlace de pago ha caducado: tu salida tardía no está confirmada. Por favor, deja el alojamiento a las {old}."], "de": ["Ihr Zahlungslink ist abgelaufen", "Der Zahlungslink ist abgelaufen: Ihr später Check-out ist nicht bestätigt. Bitte verlassen Sie die Unterkunft um {old} Uhr."], "pt": ["O seu link de pagamento expirou", "O link de pagamento expirou: a sua saída tardia não está confirmada. Por favor, deixe o alojamento às {old}."]}, "taken": {"fr": ["Votre demande de départ tardif", "Un départ tardif a déjà été confirmé pour cette date. Le montant réservé sur votre carte est libéré : rien n'a été prélevé. Merci de libérer le logement à {old}."], "en": ["Your late check-out request", "A late check-out has already been confirmed for this date. The amount held on your card has been released: nothing was charged. Please check out at {old}."], "it": ["La tua richiesta di check-out posticipato", "Un check-out posticipato è già stato confermato per questa data. L'importo bloccato sulla tua carta è stato sbloccato: non è stato addebitato nulla. Ti preghiamo di lasciare l'alloggio alle {old}."], "es": ["Tu solicitud de salida tardía", "Ya se ha confirmado una salida tardía para esta fecha. El importe retenido en tu tarjeta se ha liberado: no se ha cobrado nada. Por favor, deja el alojamiento a las {old}."], "de": ["Ihre Anfrage für einen späten Check-out", "Für dieses Datum wurde bereits ein später Check-out bestätigt. Der auf Ihrer Karte reservierte Betrag wurde freigegeben: Es wurde nichts abgebucht. Bitte verlassen Sie die Unterkunft um {old} Uhr."], "pt": ["O seu pedido de saída tardia", "Já foi confirmada uma saída tardia para esta data. O montante reservado no seu cartão foi libertado: nada foi cobrado. Por favor, deixe o alojamento às {old}."]}, "refunded": {"fr": ["Remboursement de votre départ tardif", "{amount} vous ont été remboursés. Le départ tardif est annulé : merci de libérer le logement à {old}."], "en": ["Refund of your late check-out", "{amount} has been refunded to you. The late check-out is cancelled: please check out at {old}."], "it": ["Rimborso del tuo check-out posticipato", "Ti sono stati rimborsati {amount}. Il check-out posticipato è annullato: ti preghiamo di lasciare l'alloggio alle {old}."], "es": ["Reembolso de tu salida tardía", "Se te han reembolsado {amount}. La salida tardía queda cancelada: por favor, deja el alojamiento a las {old}."], "de": ["Erstattung Ihres späten Check-outs", "{amount} wurden Ihnen erstattet. Der späte Check-out ist storniert: Bitte verlassen Sie die Unterkunft um {old} Uhr."], "pt": ["Reembolso da sua saída tardia", "Foram-lhe reembolsados {amount}. A saída tardia foi cancelada: por favor, deixe o alojamento às {old}."]}, "cancelled": {"fr": ["Demande annulée", "Ce logement n'accepte plus de demandes de départ tardif. Le montant réservé est libéré : rien n'a été prélevé."], "en": ["Request cancelled", "This property no longer accepts late check-out requests. Any amount held has been released: nothing was charged."], "it": ["Richiesta annullata", "Questo alloggio non accetta più richieste di check-out posticipato. L'importo bloccato è stato sbloccato: non è stato addebitato nulla."], "es": ["Solicitud cancelada", "Este alojamiento ya no acepta solicitudes de salida tardía. El importe retenido se ha liberado: no se ha cobrado nada."], "de": ["Anfrage storniert", "Diese Unterkunft nimmt keine Anfragen für einen späten Check-out mehr an. Der reservierte Betrag wurde freigegeben: Es wurde nichts abgebucht."], "pt": ["Pedido cancelado", "Este alojamento já não aceita pedidos de saída tardia. O montante reservado foi libertado: nada foi cobrado."]}, "capture": {"fr": ["Votre demande de départ tardif", "Le paiement réservé n'a pas pu être encaissé : votre départ tardif n'est pas confirmé. Merci de libérer le logement à {old}."], "en": ["Your late check-out request", "The held payment could not be charged: your late check-out is not confirmed. Please check out at {old}."], "it": ["La tua richiesta di check-out posticipato", "Non è stato possibile addebitare il pagamento bloccato: il tuo check-out posticipato non è confermato. Ti preghiamo di lasciare l'alloggio alle {old}."], "es": ["Tu solicitud de salida tardía", "No se ha podido cobrar el pago retenido: tu salida tardía no está confirmada. Por favor, deja el alojamiento a las {old}."], "de": ["Ihre Anfrage für einen späten Check-out", "Die reservierte Zahlung konnte nicht abgebucht werden: Ihr später Check-out ist nicht bestätigt. Bitte verlassen Sie die Unterkunft um {old} Uhr."], "pt": ["O seu pedido de saída tardia", "Não foi possível cobrar o pagamento reservado: a sua saída tardia não está confirmada. Por favor, deixe o alojamento às {old}."]}}};
+const langOf = (r) => (r && LANGS.includes(r.lang) ? r.lang : 'fr');
+const fillText = (t, v) => t.replace(/\{(\w+)\}/g, (m, k) => (v[k] == null ? '' : v[k]));
+const dayLoc = (d, L) => new Date(d + 'T12:00:00').toLocaleDateString(LOCALE[L], { weekday: 'long', day: 'numeric', month: 'long' });
+const eurLoc = (c, L) => (c / 100).toLocaleString(LOCALE[L], { style: 'currency', currency: 'EUR' });
+function gMail(r, key, v = {}) {
+  const L = langOf(r), [subject, body] = GI.mail[key][L], vars = { ...v };
+  if (vars.amount != null) vars.amount = eurLoc(vars.amount, L);
+  if (vars.date) vars.date = dayLoc(vars.date, L);
+  sendEmail(r.guest_email, subject, `${GI.hello[L]} ${r.guest_name},\n\n${fillText(body, vars)}`);
+}
+function gProduct(r, l, held) {
+  const L = langOf(r), p = GI.product[L];
+  return { name: `${p[0]} + ${r.hours} ${GI.hours[L][r.hours > 1 ? 1 : 0]} — ${l.name}`,
+    description: fillText(p[1], { time: r.new_time, old: r.old_time, date: dayLoc(r.date, L) }) + (held ? ' ' + p[2] : '') };
+}
+
 const timeFr = (t) => new Date(t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' });
 const todayParis = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Paris' });
 function fail(status, message, code) { const e = new Error(message); e.status = status; if (code) e.code = code; throw e; }
@@ -625,13 +647,13 @@ function sweep() {
   for (const r of q("SELECT * FROM requests WHERE status='pending' AND expires_at < ?").all(t)) {
     if (q("UPDATE requests SET status='expired', expired_reason='host' WHERE id=? AND status='pending'").run(r.id).changes) {
       if (r.payment_intent) releaseHold(r.payment_intent);
-      sendEmail(r.guest_email, 'Votre demande de départ tardif a expiré', `Bonjour ${r.guest_name},\n\nVotre hôte n'a pas répondu à temps. Le montant réservé sur votre carte est libéré : rien n'a été prélevé. Merci de libérer le logement à ${r.old_time}.`);
+      gMail(r, 'expired', { old: r.old_time });
     }
   }
   for (const r of q("SELECT * FROM requests WHERE status='accepted' AND pay_expires_at < ?").all(t)) {
     if (q("UPDATE requests SET status='expired', expired_reason='payment', pay_token=NULL WHERE id=? AND status='accepted'").run(r.id).changes) {
       if (r.checkout_session) stripe('POST', `/checkout/sessions/${r.checkout_session}/expire`).catch(() => {});
-      sendEmail(r.guest_email, 'Votre lien de paiement a expiré', `Bonjour ${r.guest_name},\n\nLe lien de paiement a expiré : votre départ tardif n'est pas confirmé. Merci de libérer le logement à ${r.old_time}.`);
+      gMail(r, 'paylink', { old: r.old_time });
     }
   }
 }
@@ -670,7 +692,7 @@ function recordCapturedPayment(r, pi) {
   q("UPDATE requests SET status='paid', paid_at=?, decided_at=COALESCE(decided_at, ?) WHERE id=?").run(now(), now(), r.id);
   const l = q('SELECT * FROM listings WHERE id=?').get(r.listing_id);
   const host = q('SELECT * FROM users WHERE id=?').get(r.host_id);
-  sendEmail(r.guest_email, 'Votre départ tardif est confirmé', `Bonjour ${r.guest_name},\n\nVotre hôte a accepté : vous pouvez rester jusqu'à ${hFmt(r.new_time)} le ${dayFr(r.date)} à « ${l.name} ».\n${eur(amount)} ont été prélevés sur votre carte.`);
+  gMail(r, 'confirmed', { time: r.new_time, date: r.date, name: l.name, amount });
   sendEmail(host.email, 'Départ tardif vendu', `${r.guest_name} part à ${r.new_time} le ${dayFr(r.date)} (« ${l.name} »). Paiement de ${eur(amount)} encaissé.\nCommission LateCheck : ${eur(commission)} · frais de paiement : ${eur(appFee - commission)} · net pour vous : ${eur(amount - appFee)}.`);
   return true;
 }
@@ -685,10 +707,8 @@ async function openCheckout(r) {
   const split = computeSplit(r.price);
   const expiresAt = now() + 31 * 60000; // minimum imposé par Stripe : 30 min
   const s = await stripe('POST', '/checkout/sessions', {
-    mode: 'payment', locale: 'fr', customer_email: r.guest_email,
-    line_items: [{ quantity: 1, price_data: { currency: 'eur', unit_amount: r.price, product_data: {
-      name: `Départ tardif ${hoursLabel(r.hours)} — ${l.name}`,
-      description: `Départ à ${r.new_time} au lieu de ${r.old_time}, le ${dayFr(r.date)}. Montant réservé, prélevé seulement si l'hôte accepte.` } } }],
+    mode: 'payment', locale: langOf(r), customer_email: r.guest_email,
+    line_items: [{ quantity: 1, price_data: { currency: 'eur', unit_amount: r.price, product_data: gProduct(r, l, true) } }],
     payment_intent_data: {
       capture_method: 'manual',
       application_fee_amount: split.applicationFee,
@@ -719,7 +739,7 @@ async function onCheckoutAuthorized(s) {
   const host = q('SELECT * FROM users WHERE id=?').get(r.host_id);
   sendPush(host.id, 'Nouvelle demande de départ tardif', `${r.guest_name} · ${hoursLabel(r.hours)} (jusqu'à ${r.new_time}) · ${eur(r.price)} · ${l.name}`, `#/h/requests/${r.id}`).catch((e) => console.error('push', e.message));
   sendEmail(host.email, 'Nouvelle demande de départ tardif', `${r.guest_name} demande ${hoursLabel(r.hours)} (départ à ${r.new_time}) le ${dayFr(r.date)} pour « ${l.name} ».\nLe paiement de ${eur(r.price)} est déjà réservé : acceptez pour l'encaisser.\nRépondez avant ${timeFr(exp)} : ${APP_URL}/#/h/requests/${r.id}`);
-  sendEmail(r.guest_email, 'Votre demande a bien été envoyée', `Bonjour ${r.guest_name},\n\nVotre demande de départ à ${r.new_time} a été transmise à votre hôte.\n${eur(r.price)} sont réservés sur votre carte : ils ne seront prélevés que si votre hôte accepte.\nSuivre la demande : ${APP_URL}/#/r/${r.id}/${r.guest_token}`);
+  gMail(r, 'sent', { time: r.new_time, amount: r.price, link: `${APP_URL}/#/r/${r.id}/${r.guest_token}` });
 }
 
 /* ------------------------------------------------------------------ Rattrapage sans webhook
@@ -758,7 +778,7 @@ function refuseCompeting(r) {
   for (const o of q("SELECT * FROM requests WHERE listing_id=? AND date=? AND id<>? AND status='pending'").all(r.listing_id, r.date, r.id)) {
     if (!q("UPDATE requests SET status='refused', decided_at=? WHERE id=? AND status='pending'").run(now(), o.id).changes) continue;
     if (o.payment_intent) releaseHold(o.payment_intent);
-    sendEmail(o.guest_email, 'Votre demande de départ tardif', `Bonjour ${o.guest_name},\n\nUn départ tardif a déjà été confirmé pour cette date. Le montant réservé sur votre carte est libéré : rien n'a été prélevé. Merci de libérer le logement à ${o.old_time}.`);
+    gMail(o, 'taken', { old: o.old_time });
   }
 }
 
@@ -770,7 +790,7 @@ function markRefunded(paymentId) {
   q("UPDATE requests SET status='refunded' WHERE id=?").run(p.request_id);
   issueCreditNote(p);
   const host = q('SELECT * FROM users WHERE id=?').get(p.host_id);
-  if (r) sendEmail(r.guest_email, 'Remboursement de votre départ tardif', `Bonjour ${r.guest_name},\n\n${eur(p.amount)} vous ont été remboursés. Le départ tardif est annulé : merci de libérer le logement à ${r.old_time}.`);
+  if (r) gMail(r, 'refunded', { amount: p.amount, old: r.old_time });
   if (host) sendEmail(host.email, 'Paiement remboursé', `Le paiement de ${eur(p.amount)} de ${r ? r.guest_name : 'votre voyageur'} a été remboursé.`);
   return true;
 }
@@ -807,7 +827,7 @@ async function onCheckoutCompleted(s) {
   q("UPDATE requests SET status='paid', paid_at=?, pay_token_used=pay_token, pay_token=NULL WHERE id=?").run(now(), r.id);
   const l = q('SELECT * FROM listings WHERE id=?').get(r.listing_id);
   const host = q('SELECT * FROM users WHERE id=?').get(r.host_id);
-  sendEmail(r.guest_email, 'Votre départ tardif est confirmé', `Bonjour ${r.guest_name},\n\nPaiement de ${eur(pi.amount)} reçu. Votre départ tardif est confirmé : vous pouvez rester jusqu'à ${hFmt(r.new_time)} le ${dayFr(r.date)} à « ${l.name} ».`);
+  gMail(r, 'confirmed', { time: r.new_time, date: r.date, name: l.name, amount: pi.amount });
   sendEmail(host.email, 'Départ tardif payé', `${r.guest_name} a payé ${eur(pi.amount)} pour partir à ${r.new_time} le ${dayFr(r.date)} (« ${l.name} »).\nCommission LateCheck : ${eur(commission)} · frais de paiement : ${eur(appFee - commission)} · net pour vous : ${eur(pi.amount - appFee)}.`);
 }
 async function handleStripeEvent(ev) {
@@ -826,7 +846,7 @@ async function handleStripeEvent(ev) {
     case 'payment_intent.canceled': {
       const r = q("SELECT * FROM requests WHERE payment_intent=? AND status='pending'").get(o.id);
       if (r && q("UPDATE requests SET status='expired', expired_reason='host' WHERE id=? AND status='pending'").run(r.id).changes)
-        sendEmail(r.guest_email, 'Votre demande de départ tardif a expiré', `Bonjour ${r.guest_name},\n\nLe montant réservé sur votre carte est libéré : rien n'a été prélevé.`);
+        gMail(r, 'released');
       return;
     }
     case 'checkout.session.expired': {
@@ -1103,7 +1123,7 @@ route('POST', '/api/account/delete', async (req, res) => {
   for (const r of q("SELECT * FROM requests WHERE host_id=? AND status IN ('pending','capturing','accepted','awaiting_payment')").all(u.id)) {
     q("UPDATE requests SET status='cancelled', pay_token=NULL WHERE id=?").run(r.id);
     if (r.payment_intent) await releaseHold(r.payment_intent);
-    if (r.status !== 'awaiting_payment') sendEmail(r.guest_email, 'Demande annulée', `Bonjour ${r.guest_name},\n\nCe logement n'accepte plus de demandes. Le montant réservé est libéré : rien n'a été prélevé.`);
+    if (r.status !== 'awaiting_payment') gMail(r, 'cancelled');
   }
   q("UPDATE requests SET guest_name='Voyageur', guest_email='anonyme@latecheck.invalid', message=NULL WHERE host_id=?").run(u.id);
   q('UPDATE listings SET deleted=1, paused=1, photo=NULL, name=?, address=? WHERE host_id=?').run('Logement supprimé', '', u.id);
@@ -1162,7 +1182,7 @@ route('DELETE', '/api/listings/:id', (req, _res, id) => {
     q("UPDATE requests SET status='cancelled', pay_token=NULL WHERE id=?").run(r.id);
     if (r.payment_intent) releaseHold(r.payment_intent);
     if (r.checkout_session) stripe('POST', `/checkout/sessions/${r.checkout_session}/expire`).catch(() => {});
-    sendEmail(r.guest_email, 'Demande annulée', `Bonjour ${r.guest_name},\n\nCe logement n'accepte plus de demandes de départ tardif. Aucun paiement n'a été effectué.`);
+    gMail(r, 'cancelled');
   }
 });
 
@@ -1183,7 +1203,7 @@ route('POST', '/api/requests/:id/accept', async (req, _res, id) => {
     else if (st === 'requires_capture') { q("UPDATE requests SET status='pending' WHERE id=?").run(id); throw e; }
     else {
       q("UPDATE requests SET status='expired', expired_reason='payment' WHERE id=?").run(id);
-      sendEmail(r.guest_email, 'Votre demande de départ tardif', `Bonjour ${r.guest_name},\n\nLe paiement réservé n'a pas pu être encaissé : votre départ tardif n'est pas confirmé. Merci de libérer le logement à ${r.old_time}.`);
+      gMail(r, 'capture', { old: r.old_time });
       fail(409, "La réservation du paiement a expiré : rien n'a pu être encaissé. Le voyageur est prévenu.");
     }
   }
@@ -1197,7 +1217,7 @@ route('POST', '/api/requests/:id/refuse', async (req, _res, id) => {
   if (!q("UPDATE requests SET status='refused', decided_at=?, pay_token=NULL WHERE id=? AND status='pending'").run(now(), id).changes) fail(409, 'Cette demande a déjà été traitée.');
   if (r.payment_intent) await releaseHold(r.payment_intent);
   const l = q('SELECT * FROM listings WHERE id=?').get(r.listing_id);
-  sendEmail(r.guest_email, 'Votre demande de départ tardif', `Bonjour ${r.guest_name},\n\nVotre hôte ne peut pas accepter votre demande pour « ${l.name} ». Le montant réservé sur votre carte est libéré : rien n'a été prélevé. Merci de libérer le logement à ${r.old_time}.`);
+  gMail(r, 'refused', { name: l.name, old: r.old_time });
 });
 
 /* Remboursement (hôte propriétaire du paiement ou administrateur) */
@@ -1235,9 +1255,9 @@ route('POST', '/api/public/requests', async (req) => {
   let r = q("SELECT * FROM requests WHERE listing_id=? AND guest_email=? AND date=? AND hours=? AND status='awaiting_payment'").get(l.id, email, date, hours);
   if (!r) {
     const id = newId('req_');
-    q(`INSERT INTO requests(id,listing_id,host_id,guest_name,guest_email,guest_token,date,hours,price,old_time,new_time,message,status,created_at,expires_at,cgv_accepted_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'awaiting_payment',?,?,?)`)
-      .run(id, l.id, l.host_id, name, email, newToken(), date, hours, prices[hours], l.checkout, addHours(l.checkout, hours), message || null, now(), now() + 40 * 60000, now());
+    q(`INSERT INTO requests(id,listing_id,host_id,guest_name,guest_email,guest_token,date,hours,price,old_time,new_time,message,status,created_at,expires_at,cgv_accepted_at,lang)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'awaiting_payment',?,?,?,?)`)
+      .run(id, l.id, l.host_id, name, email, newToken(), date, hours, prices[hours], l.checkout, addHours(l.checkout, hours), message || null, now(), now() + 40 * 60000, now(), LANGS.includes(b.lang) ? b.lang : 'fr');
     r = q('SELECT * FROM requests WHERE id=?').get(id);
   }
   try { return { id: r.id, guestToken: r.guest_token, url: await openCheckout(r) }; }
@@ -1273,9 +1293,8 @@ route('POST', '/api/public/pay/:token/checkout', async (req, _res, token) => {
   const split = computeSplit(r.price);
   const expiresAt = Math.max(r.pay_expires_at, now() + 31 * 60000); // Stripe exige au moins 30 min
   const s = await stripe('POST', '/checkout/sessions', {
-    mode: 'payment', locale: 'fr', customer_email: r.guest_email,
-    line_items: [{ quantity: 1, price_data: { currency: 'eur', unit_amount: r.price, product_data: {
-      name: `Départ tardif ${hoursLabel(r.hours)} — ${l.name}`, description: `Départ à ${r.new_time} au lieu de ${r.old_time}, le ${dayFr(r.date)}` } } }],
+    mode: 'payment', locale: langOf(r), customer_email: r.guest_email,
+    line_items: [{ quantity: 1, price_data: { currency: 'eur', unit_amount: r.price, product_data: gProduct(r, l, false) } }],
     payment_intent_data: {
       application_fee_amount: split.applicationFee,
       transfer_data: { destination: host.stripe_account },
