@@ -65,7 +65,7 @@ body::before{content:"";position:fixed;top:0;left:0;right:0;height:env(safe-area
 .iconbtn{width:44px;height:44px;border:0;background:none;border-radius:12px;display:grid;place-items:center;cursor:pointer;color:var(--ink)}
 @media (hover:hover) and (pointer:fine){.iconbtn:hover{background:var(--surface)}}
 .main{flex:1;padding:8px 20px 28px}
-.has-nav .main{padding-bottom:96px}
+.has-nav .main{padding-bottom:calc(112px + env(safe-area-inset-bottom,0px))}
 
 .nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:var(--bg);border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(4,1fr);padding:6px 6px calc(6px + env(safe-area-inset-bottom,0px));z-index:6}
 .nav a{display:flex;flex-direction:column;align-items:center;gap:2px;font-size:11.5px;color:var(--muted);text-decoration:none;padding:6px 0;border-radius:12px;position:relative}
@@ -326,6 +326,10 @@ html:has(#app.wide),html:has(#app.wide) body{background:var(--bg)}
 .langfab{position:fixed;right:14px;bottom:calc(14px + env(safe-area-inset-bottom,0px));z-index:20;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
 .langfab[hidden]{display:none}
 .langfab.up{bottom:calc(78px + env(safe-area-inset-bottom,0px))}
+.langfab.tp{bottom:auto;top:calc(env(safe-area-inset-top,0px) + 10px);right:58px}
+.langfab.tp .langbtn{height:36px;padding:0 11px;gap:5px;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.10)}
+.langfab.tp .langbtn svg{width:16px;height:16px}
+.langfab.tp .langmenu{order:1}
 .langbtn{display:flex;align-items:center;gap:6px;height:42px;padding:0 14px;border:1px solid var(--line);border-radius:21px;background:var(--bg);color:var(--ink);font:600 14px/1 inherit;font-family:inherit;box-shadow:0 4px 16px rgba(0,0,0,.12);cursor:pointer;touch-action:manipulation}
 .langmenu{display:none;order:-1;list-style:none;margin:0;padding:6px;min-width:170px;background:var(--bg);border:1px solid var(--line);border-radius:14px;box-shadow:0 8px 28px rgba(0,0,0,.16)}
 .langfab.open .langmenu{display:block}
@@ -335,10 +339,10 @@ html:has(#app.wide),html:has(#app.wide) body{background:var(--bg)}
 .langsel{justify-self:end;width:60px;height:36px;padding:0 6px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:600 16px/1 inherit;font-family:inherit;text-overflow:ellipsis;touch-action:manipulation}
 #print-area{display:none}
 @media print{
-  body *{visibility:hidden}
-  #print-area,#print-area *{visibility:visible}
-  #print-area{display:block;position:absolute;inset:0;text-align:center;padding:0;font-family:Figtree,sans-serif;color:#17261D}
-  #print-area img{width:100%!important;height:auto!important;margin:0!important;display:block}
+  html,body{margin:0!important;padding:0!important;background:#fff!important;height:auto!important}
+  body>*{display:none!important}
+  body>#print-area{display:block!important;position:static;width:100%;height:209mm;overflow:hidden;text-align:center;padding:0;margin:0;page-break-after:avoid;break-after:avoid}
+  #print-area img{display:block;width:100%!important;height:209mm!important;object-fit:contain;margin:0!important}
   @page{size:A5 portrait;margin:0}
 }
 </style>
@@ -477,7 +481,7 @@ function topBar({title='LateCheck', back=null, brand=false, right=''}={}){
   return `<header class="top">${back?`<button class="iconbtn" aria-label="Retour" data-go="${esc(back)}">${I.back}</button>`:'<span></span>'}
   <h1 class="${brand?'brand':''}" ${brand?'style="grid-column:1/3"':''}>${esc(title)}</h1>${right||'<span></span>'}</header>`;
 }
-function page(html, {nav=null, wide=false}={}){ const me = (typeof STATE !== 'undefined' && STATE) ? STATE.me : null; const marked = html.includes('data-lang-ui'); const multi = marked || !me || me.role==='host'; document.documentElement.lang = multi ? LANG : 'fr'; app.className = (nav ? 'has-nav' : '') + (wide ? ' wide' : ''); app.innerHTML = html + (nav||''); syncLangFab(multi, !!nav); if(!marked) hxNode(app); }
+function page(html, {nav=null, wide=false}={}){ const me = (typeof STATE !== 'undefined' && STATE) ? STATE.me : null; const marked = html.includes('data-lang-ui'); const multi = marked || !me || me.role==='host'; document.documentElement.lang = multi ? LANG : 'fr'; app.className = (nav ? 'has-nav' : '') + (wide ? ' wide' : ''); app.innerHTML = html + (nav||''); syncLangFab(multi, !!nav, !!(me && me.role==='host' && !marked)); if(!marked) hxNode(app); }
 function hostNav(active, db, u){
   const pending = hostRequests(db,u.id).filter(r=>r.status==='pending').length;
   const it = (k,h,ic,l,b) => `<a href="${h}" class="${active===k?'on':''}">${ic}${b?`<span class="badge">${b}</span>`:''}${l}</a>`;
@@ -804,7 +808,26 @@ route('/h/listings/:id/prices', id => {
 // Adresse officielle du site (APP_URL du serveur) : les QR codes ne dépendent jamais de l'adresse par laquelle l'hôte ouvre l'app
 const siteUrl = () => (STATE && STATE.appUrl && /^https:\/\//.test(STATE.appUrl)) ? STATE.appUrl.replace(/\/$/, '') + '/' : location.origin + location.pathname;
 const guestUrl = l => siteUrl() + '#/s/' + l.slug;
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+function downloadBlob(name, blob){ const u=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=u; a.download=name; a.rel='noopener'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u), 8000); }
 const saveBlob = (n,b) => downloadBlob(n,b);
+/* PDF A5 d'une seule page, sans en-tête ni pied de page : l'affiche JPEG occupe toute la page */
+async function posterPdfBlob(canvas){
+  const jpg = new Uint8Array(await (await new Promise(r=>canvas.toBlob(r,'image/jpeg',.92))).arrayBuffer());
+  const enc = new TextEncoder(), W=419.53, H=595.28, parts=[], offs=[]; let len=0;
+  const add = x => { const u = typeof x==='string' ? enc.encode(x) : x; parts.push(u); len += u.length; };
+  const obj = (n, body) => { offs[n]=len; add(n+' 0 obj\n'); add(body); add('\nendobj\n'); };
+  add('%PDF-1.4\n');
+  obj(1,'<< /Type /Catalog /Pages 2 0 R >>');
+  obj(2,'<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
+  obj(3,'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 '+W+' '+H+'] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>');
+  offs[4]=len; add('4 0 obj\n<< /Type /XObject /Subtype /Image /Width '+canvas.width+' /Height '+canvas.height+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+jpg.length+' >>\nstream\n'); add(jpg); add('\nendstream\nendobj\n');
+  const cs='q '+W+' 0 0 '+H+' 0 0 cm /Im0 Do Q';
+  obj(5,'<< /Length '+cs.length+' >>\nstream\n'+cs+'\nendstream');
+  const xref=len; let x='xref\n0 6\n0000000000 65535 f \n'; for(let i=1;i<=5;i++) x+=String(offs[i]).padStart(10,'0')+' 00000 n \n';
+  add(x+'trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n'+xref+'\n%%EOF');
+  return new Blob(parts, {type:'application/pdf'});
+}
 /* ============================ Affiche QR code (A5) ============================ */
 const POSTER_W = 1240, POSTER_H = 1754; // A5 portrait, ~210 dpi
 const P_STYLES = {
@@ -895,7 +918,7 @@ route('/h/listings/:id/qr', id => {
     <div class="optrow"><span>Langue</span>${posterChips('lang',o.lang,[['fr','Français'],['fren','Français + anglais']])}</div>
     <div class="stack mt"><button class="btn" data-act="posterprint" data-id="${l.id}">${I.print} Imprimer l'affiche${isNative()?'':' (A5)'}</button>
     <div class="row2"><button class="btn soft sm" data-act="posterdl" data-id="${l.id}">${I.dl} ${isNative()?'Enregistrer':'Télécharger'}</button><button class="btn soft sm" data-act="copylink" data-url="${esc(guestUrl(l))}">${I.link} Copier le lien</button></div>
-    <a class="btn ghost" href="#/s/${l.slug}">Tester comme un voyageur</a></div>
+    <button type="button" class="btn ghost" data-act="preview" data-slug="${l.slug}">Tester comme un voyageur</button></div>
     <h3 class="sec">Où la placer</h3>
     <div class="kv"><div><span>Porte d'entrée, côté intérieur</span><b>vue en faisant les valises</b></div><div><span>À côté des clés ou de la boîte à clés</span><b>vue au départ</b></div><div><span>Table de nuit ou miroir de salle de bain</span><b>vue le soir et le matin</b></div></div>
     <h3 class="sec">Doublez vos demandes</h3>
@@ -959,10 +982,12 @@ async function sharePoster(l){
   return shareOrOffer(file, 'Affiche LateCheck · '+l.name, ()=>posterViewer(l, a.jpg));
 }
 const slugName = l => l.name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,40);
-ACT.posterdl = async btn => { const l=findOwnListing(btn.dataset.id); if(!l) return; if(isNative()) return sharePoster(l); const c=await posterCanvas(l, posterOpts(l.id));
+ACT.posterdl = async btn => { const l=findOwnListing(btn.dataset.id); if(!l) return; if(isNative() || isIOS()) return sharePoster(l); const c=await posterCanvas(l, posterOpts(l.id));
   c.toBlob(b => saveBlob('affiche-latecheck-'+slugName(l)+'.png', b), 'image/png'); };
 ACT.posterprint = async btn => { const l=findOwnListing(btn.dataset.id); if(!l) return;
-  if(isNative()){ const a=await posterAsset(l); if(await nativePrint(a.blob,'image','Affiche LateCheck · '+l.name)) return; return sharePoster(l); } const c=await posterCanvas(l, posterOpts(l.id));
+  if(isNative()){ const a=await posterAsset(l); if(await nativePrint(a.blob,'image','Affiche LateCheck · '+l.name)) return; return sharePoster(l); }
+  if(isIOS()){ const c=await posterCanvas(l, posterOpts(l.id)); const pdf=await posterPdfBlob(c); const file=new File([pdf], 'affiche-latecheck-'+slugName(l)+'.pdf', {type:'application/pdf'}); return shareOrOffer(file, 'Affiche LateCheck · '+l.name, ()=>posterViewer(l, c.toDataURL('image/jpeg',.9))); }
+  const c=await posterCanvas(l, posterOpts(l.id));
   $('#print-area').innerHTML=`<img src="${c.toDataURL('image/png')}" alt="Affiche LateCheck">`;
   setTimeout(()=>{ try{ window.print(); }catch(e){ toast("Impression bloquée ici : téléchargez l'affiche puis imprimez-la."); } }, 80); };
 ACT.copymsg = async btn => { const l=findOwnListing(btn.dataset.id); if(!l) return; const t=guestMessage(l);
@@ -1445,9 +1470,9 @@ function hxNode(root){
 { const _confirm = window.confirm.bind(window); window.confirm = m => _confirm(hostMode() ? (H_MAP.get(String(m)) ? H_MAP.get(String(m))[G_LANGS.indexOf(LANG)] : m) : m); }
 /* Bouton de langue global : visible sur l'accueil et sur tout le parcours voyageur, hors de l'espace hôte */
 let langFab = null;
-function syncLangFab(show, up){
+function syncLangFab(show, up, top){
   if(!langFab){ langFab = document.createElement('div'); langFab.className = 'langfab'; document.body.appendChild(langFab); }
-  langFab.hidden = !show; langFab.classList.toggle('up', !!up); if(!show){ langFab.classList.remove('open'); return; }
+  langFab.hidden = !show; langFab.classList.toggle('up', !!up && !top); langFab.classList.toggle('tp', !!top); if(!show){ langFab.classList.remove('open'); return; }
   langFab.innerHTML = `<button type="button" class="langbtn" data-act="langmenu" aria-haspopup="listbox" aria-expanded="${langFab.classList.contains('open')}" aria-label="${g('Langue')}"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.8 3 2.8 15 0 18M12 3c-2.8 3-2.8 15 0 18"/></svg><b>${LANG.toUpperCase()}</b></button>
     <ul class="langmenu" role="listbox">${G_LANGS.map(c=>`<li><button type="button" role="option" data-act="langset" data-l="${c}" aria-selected="${c===LANG}" class="${c===LANG?'on':''}">${G_NAMES[c]}</button></li>`).join('')}</ul>`;
 }
@@ -1463,7 +1488,9 @@ const gHours = h => '+ '+h+' '+G_H[LANG][h>1?1:0];
 const gPill = st => statusPill(st).replace(/>([^<]+)</, (m,t) => '>'+g(t)+'<');
 const gTry = async fn => { try{ return await fn(); }catch(e){ e.message = g(e.message); throw e; } };
 /* Un hôte connecté qui regarde l'aperçu voyageur garde toujours un bouton pour revenir à son espace */
-const hostBack = l => STATE.me && STATE.me.role==='host' ? (l && l.hostId===STATE.me.id ? '#/h/listings/'+l.id : '#/h/listings') : null;
+const isPreview = () => { try{ return sessionStorage.getItem('lc_preview')==='1'; }catch(e){ return false; } };
+ACT.preview = btn => { try{ sessionStorage.setItem('lc_preview','1'); }catch(e){} go('#/s/'+btn.dataset.slug); };
+const hostBack = l => STATE.me && STATE.me.role==='host' && isPreview() ? (l && l.hostId===STATE.me.id ? '#/h/listings/'+l.id : '#/h/listings') : null;
 function guestTop(back){
   document.documentElement.lang = LANG; back = back || hostBack();
   return `<header class="top gt">${back?`<button class="iconbtn" aria-label="${g('Retour')}" data-go="${esc(back)}">${I.back}</button>`:'<span></span>'}<h1>LateCheck</h1><span data-lang-ui hidden></span></header>`;
